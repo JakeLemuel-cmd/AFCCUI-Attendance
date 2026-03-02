@@ -322,7 +322,9 @@ class UserController extends Controller
         $request->validate([
             'import_id' => ['required', 'string', 'max:120'],
             'file' => ['required', 'file', 'mimes:csv,txt'],
+            'continue_on_error' => ['nullable', 'boolean'],
         ]);
+        $continueOnError = $request->boolean('continue_on_error', true);
 
         $importId = (string) $request->input('import_id');
         $this->setVoterImportProgress($importId, [
@@ -422,7 +424,7 @@ class UserController extends Controller
 
         $payloads = [];
         $errors = [];
-        $seenEmails = [];
+        $seenRowKeys = [];
 
         foreach (array_slice($rows, $headerRowIndex + 1) as $index => $rowValues) {
             $line = $headerRowIndex + $index + 2;
@@ -475,18 +477,21 @@ class UserController extends Controller
                 continue;
             }
 
-            if ($normalized['email'] !== null) {
-                if (in_array($normalized['email'], $seenEmails, true)) {
-                    $errors[] = [
-                        'line' => $line,
-                        'message' => 'Duplicate email found within the CSV file.',
-                    ];
+            $rowKey = $normalized['email'] !== null
+                ? 'email:'.$normalized['email']
+                : 'identity:'.$this->voterIdentityKey((string) $normalized['name'], $normalized['branch']);
 
-                    continue;
-                }
+            if (isset($seenRowKeys[$rowKey])) {
+                $errors[] = [
+                    'line' => $line,
+                    'message' => $normalized['email'] !== null
+                        ? 'Duplicate email found within the CSV file.'
+                        : 'Duplicate NAME + BRANCH found within the CSV file.',
+                ];
 
-                $seenEmails[] = $normalized['email'];
+                continue;
             }
+            $seenRowKeys[$rowKey] = true;
 
             $payloads[] = [
                 'line' => $line,
@@ -507,10 +512,26 @@ class UserController extends Controller
                 ->get()
                 ->keyBy(fn (User $user): string => strtolower((string) $user->email));
 
+        $existingUsersByIdentity = collect();
+        $existingVotersWithoutEmail = User::query()
+            ->where('role', UserRole::VOTER->value)
+            ->whereNull('email')
+            ->orderBy('id')
+            ->get();
+
+        foreach ($existingVotersWithoutEmail as $existingVoterWithoutEmail) {
+            $identityKey = $this->voterIdentityKey((string) $existingVoterWithoutEmail->name, $existingVoterWithoutEmail->branch);
+            if (! $existingUsersByIdentity->has($identityKey)) {
+                $existingUsersByIdentity->put($identityKey, $existingVoterWithoutEmail);
+            }
+        }
+
+        $validatedPayloads = [];
         foreach ($payloads as $payload) {
             $email = $payload['data']['email'] ?? null;
 
             if ($email === null) {
+                $validatedPayloads[] = $payload;
                 continue;
             }
 
@@ -520,10 +541,16 @@ class UserController extends Controller
                     'line' => $payload['line'],
                     'message' => 'This email belongs to a non-voter account and cannot be imported as voter.',
                 ];
-            }
-        }
 
-        if (count($errors) > 0) {
+                continue;
+            }
+
+            $validatedPayloads[] = $payload;
+        }
+        $payloads = $validatedPayloads;
+        $skipped = count($errors);
+
+        if (count($errors) > 0 && ! $continueOnError) {
             $this->setVoterImportProgress($importId, [
                 'status' => 'failed',
                 'percent' => 0,
@@ -531,7 +558,7 @@ class UserController extends Controller
                 'total' => count($payloads),
                 'created' => 0,
                 'updated' => 0,
-                'message' => 'Import failed due to CSV validation errors.',
+                'message' => 'Import failed due to CSV validation errors. Enable continue_on_error to skip invalid rows.',
             ]);
 
             return response()->json([
@@ -554,13 +581,16 @@ class UserController extends Controller
             'total' => $totalPayloads,
             'created' => 0,
             'updated' => 0,
-            'message' => 'Importing voters...',
+            'message' => $continueOnError && $skipped > 0
+                ? "Importing voters... {$skipped} row(s) will be skipped."
+                : 'Importing voters...',
         ]);
 
         try {
             DB::transaction(function () use (
                 $payloads,
                 $existingUsersByEmail,
+                $existingUsersByIdentity,
                 $defaultPasswordHash,
                 $totalPayloads,
                 $importId,
@@ -571,9 +601,10 @@ class UserController extends Controller
             ): void {
                 foreach ($payloads as $payloadItem) {
                     $payload = $payloadItem['data'];
+                    $identityKey = $this->voterIdentityKey((string) $payload['name'], $payload['branch']);
                     $existingUser = $payload['email'] !== null
                         ? $existingUsersByEmail->get($payload['email'])
-                        : null;
+                        : $existingUsersByIdentity->get($identityKey);
 
                     $attributes = [
                         'name' => $payload['name'],
@@ -596,6 +627,8 @@ class UserController extends Controller
 
                         if ($payload['email'] !== null) {
                             $existingUsersByEmail->put($payload['email'], $user);
+                        } else {
+                            $existingUsersByIdentity->put($identityKey, $user);
                         }
 
                         $created++;
@@ -653,7 +686,7 @@ class UserController extends Controller
         AuditLogger::log(
             $request,
             'voter.import',
-            "Voter import completed. Created: {$created}, Updated: {$updated}, Processed: {$totalPayloads}."
+            "Voter import completed. Created: {$created}, Updated: {$updated}, Processed: {$totalPayloads}, Skipped: {$skipped}."
         );
 
         $this->setVoterImportProgress($importId, [
@@ -663,16 +696,22 @@ class UserController extends Controller
             'total' => $totalPayloads,
             'created' => $created,
             'updated' => $updated,
-            'message' => 'Voter import completed.',
+            'message' => $continueOnError && $skipped > 0
+                ? "Voter import completed with {$skipped} skipped row(s)."
+                : 'Voter import completed.',
         ]);
 
         return response()->json([
-            'message' => 'Voters imported successfully.',
+            'message' => $continueOnError && $skipped > 0
+                ? 'Voters imported with skipped rows. Review errors for details.'
+                : 'Voters imported successfully.',
             'meta' => [
                 'created' => $created,
                 'updated' => $updated,
                 'total_processed' => $totalPayloads,
+                'skipped' => $skipped,
             ],
+            'errors' => $continueOnError ? $errors : [],
         ]);
     }
 
@@ -914,6 +953,94 @@ class UserController extends Controller
 
         return response()->json([
             'message' => 'Voter deleted successfully.',
+        ]);
+    }
+
+    public function deleteAllVotersExceptProtected(Request $request): JsonResponse
+    {
+        if (! $request->user()->isSuperAdmin()) {
+            return response()->json([
+                'message' => 'Only super admins can delete voters in bulk.',
+            ], 403);
+        }
+
+        $data = $request->validate([
+            'confirmation' => ['required', 'string'],
+        ]);
+
+        if (strtoupper(trim((string) $data['confirmation'])) !== 'DELETE VOTERS') {
+            return response()->json([
+                'message' => 'Type "DELETE VOTERS" to confirm bulk deletion.',
+            ], 422);
+        }
+
+        $protectedEmails = $this->bulkDeleteProtectedEmails();
+        $protectedUsers = User::query()
+            ->whereNotNull('email')
+            ->where(function (Builder $query) use ($protectedEmails): void {
+                foreach ($protectedEmails as $email) {
+                    $query->orWhereRaw('LOWER(email) = ?', [$email]);
+                }
+            })
+            ->get();
+
+        $protectedUserIds = $protectedUsers->pluck('id')->all();
+
+        if (count($protectedUserIds) === 0) {
+            return response()->json([
+                'message' => 'No protected accounts were found. Bulk delete was cancelled.',
+            ], 422);
+        }
+
+        $fallbackElectionOwnerId = $protectedUsers
+            ->first(fn (User $user): bool => $user->isSuperAdmin() || $user->isElectionAdmin())
+            ?->id;
+
+        if ($fallbackElectionOwnerId === null) {
+            return response()->json([
+                'message' => 'No protected admin account is available to retain election ownership.',
+            ], 422);
+        }
+
+        [$deletedCount, $reassignedElectionCount] = DB::transaction(function () use ($protectedUserIds, $fallbackElectionOwnerId): array {
+            $reassignedElectionCount = DB::table('elections')
+                ->whereNotIn('created_by', $protectedUserIds)
+                ->update(['created_by' => $fallbackElectionOwnerId]);
+
+            $deleteQuery = User::query()->whereNotIn('id', $protectedUserIds);
+            $deletedCount = (int) (clone $deleteQuery)->count();
+
+            if ($deletedCount > 0) {
+                $deleteQuery->delete();
+            }
+
+            return [$deletedCount, $reassignedElectionCount];
+        });
+
+        if ($deletedCount === 0) {
+            return response()->json([
+                'message' => 'No users found to delete.',
+                'data' => [
+                    'deleted' => 0,
+                    'reassigned_elections' => $reassignedElectionCount,
+                    'protected_accounts' => $protectedEmails,
+                ],
+            ]);
+        }
+
+        AuditLogger::log(
+            $request,
+            'voter.bulk_delete',
+            "Bulk user deletion completed. Deleted: {$deletedCount}, Reassigned elections: {$reassignedElectionCount}."
+        );
+
+        return response()->json([
+            'message' => 'Voters deleted successfully. Protected accounts were kept.',
+            'data' => [
+                'deleted' => $deletedCount,
+                'reassigned_elections' => $reassignedElectionCount,
+                'protected_accounts' => $protectedEmails,
+            ],
         ]);
     }
 
@@ -1194,6 +1321,15 @@ class UserController extends Controller
         };
     }
 
+    private function voterIdentityKey(string $name, ?string $branch): string
+    {
+        $normalizedName = strtolower(trim((string) (preg_replace('/\s+/u', ' ', $name) ?? $name)));
+        $branchValue = $branch ?? '';
+        $normalizedBranch = strtolower(trim((string) (preg_replace('/\s+/u', ' ', $branchValue) ?? $branchValue)));
+
+        return $normalizedName.'|'.$normalizedBranch;
+    }
+
     private function generateUniqueVoterId(string $name, int $userId): string
     {
         $firstName = trim((string) Str::of($name)->before(' '));
@@ -1317,5 +1453,17 @@ class UserController extends Controller
             ],
             now()->addMinutes(30)
         );
+    }
+
+    /**
+     * @return array<int, string>
+     */
+    private function bulkDeleteProtectedEmails(): array
+    {
+        return [
+            'superadmin@voting.local',
+            'electionadmin@voting.local',
+            'voter@voting.local',
+        ];
     }
 }

@@ -5,6 +5,7 @@ import QRCode from "qrcode";
 import { getElections } from "@/api/elections";
 import {
   createVoter,
+  deleteAllVotersExceptProtected,
   deleteVoter,
   downloadVoterTemplate,
   exportVoterLogs,
@@ -136,7 +137,9 @@ export function VotersPage() {
   const [exportQrProgress, setExportQrProgress] = useState<{ processed: number; total: number } | null>(null);
   const [addingVoter, setAddingVoter] = useState(false);
   const [deletingVoterId, setDeletingVoterId] = useState<number | null>(null);
+  const [deletingAllVoters, setDeletingAllVoters] = useState(false);
   const [voterToDelete, setVoterToDelete] = useState<User | null>(null);
+  const [deleteAllVotersOpen, setDeleteAllVotersOpen] = useState(false);
   const [qrVoter, setQrVoter] = useState<User | null>(null);
   const [qrCardDataUrl, setQrCardDataUrl] = useState<string | null>(null);
   const [loadingQrCard, setLoadingQrCard] = useState(false);
@@ -554,6 +557,24 @@ export function VotersPage() {
     }
   };
 
+  const handleDeleteAllVoters = async () => {
+    try {
+      setDeletingAllVoters(true);
+      setError(null);
+      setSuccess(null);
+
+      const response = await deleteAllVotersExceptProtected("DELETE VOTERS");
+      await loadVoters();
+      setSuccess(response.message);
+      setDeleteAllVotersOpen(false);
+      setMenuOpen(false);
+    } catch (deleteError) {
+      setError(extractErrorMessage(deleteError));
+    } finally {
+      setDeletingAllVoters(false);
+    }
+  };
+
   return (
     <Card>
       <CardHeader>
@@ -686,6 +707,17 @@ export function VotersPage() {
                       ? `Generating QR Cards (${exportQrProgress.processed}/${exportQrProgress.total})...`
                       : "Generating QR Cards..."
                     : "Export Voter QR Cards"}
+                </button>
+                <button
+                  className="inline-flex w-full items-center gap-2 rounded px-3 py-2 text-left text-sm text-destructive hover:bg-destructive/10 disabled:cursor-not-allowed disabled:opacity-60"
+                  disabled={deletingAllVoters}
+                  onClick={() => {
+                    setDeleteAllVotersOpen(true);
+                    setMenuOpen(false);
+                  }}
+                >
+                  <Trash2 className="h-4 w-4" />
+                  Delete Voters
                 </button>
               </div>
             ) : null}
@@ -999,6 +1031,48 @@ export function VotersPage() {
               Download QR Card
             </Button>
             <AlertDialogCancel>Close</AlertDialogCancel>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      <AlertDialog
+        open={deleteAllVotersOpen}
+        onOpenChange={(open) => {
+          if (!deletingAllVoters) {
+            setDeleteAllVotersOpen(open);
+          }
+        }}
+      >
+        <AlertDialogContent className="max-w-lg">
+          <AlertDialogHeader>
+            <AlertDialogTitle className="flex items-center gap-2 text-destructive">
+              <AlertTriangle className="h-5 w-5" />
+              Delete Voters
+            </AlertDialogTitle>
+            <AlertDialogDescription>
+              This will delete all users except:
+              <br />
+              <span className="font-semibold text-foreground">superadmin@voting.local</span>
+              <br />
+              <span className="font-semibold text-foreground">electionadmin@voting.local</span>
+              <br />
+              <span className="font-semibold text-foreground">voter@voting.local</span>
+              <br />
+              This action cannot be undone.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={deletingAllVoters}>Cancel</AlertDialogCancel>
+            <Button
+              type="button"
+              variant="destructive"
+              disabled={deletingAllVoters}
+              onClick={() => {
+                void handleDeleteAllVoters();
+              }}
+            >
+              {deletingAllVoters ? "Deleting..." : "Delete Voters"}
+            </Button>
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>

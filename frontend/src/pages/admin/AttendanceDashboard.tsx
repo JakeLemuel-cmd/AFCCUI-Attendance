@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { IScannerControls } from "@zxing/browser";
-import { CalendarCheck2, Camera, ChevronDown, Download, Link as LinkIcon, Plus, Upload, UserCheck2, UserX, Users } from "lucide-react";
-import { exportPresentAttendancesCsv, getAttendances, upsertAttendance } from "@/api/attendance";
+import { CalendarCheck2, Camera, ChevronDown, Download, Link as LinkIcon, Plus, Trash2, Upload, UserCheck2, UserX, Users } from "lucide-react";
+import { deleteAttendancesForElection, exportPresentAttendancesCsv, getAttendances, upsertAttendance } from "@/api/attendance";
 import { extractErrorMessage } from "@/api/client";
 import { getElections } from "@/api/elections";
 import { getVoters } from "@/api/users";
@@ -114,6 +114,10 @@ export function AttendanceDashboard({ view = "attendance" }: AttendanceDashboard
   const [addingAttendance, setAddingAttendance] = useState(false);
   const [addAttendanceError, setAddAttendanceError] = useState<string | null>(null);
   const [addAttendanceLookupError, setAddAttendanceLookupError] = useState<string | null>(null);
+  const [deleteAttendanceOpen, setDeleteAttendanceOpen] = useState(false);
+  const [deletingAttendance, setDeletingAttendance] = useState(false);
+  const [deleteConfirmationInput, setDeleteConfirmationInput] = useState("");
+  const [deleteAttendanceError, setDeleteAttendanceError] = useState<string | null>(null);
   const [uploadingQr, setUploadingQr] = useState(false);
   const [scanOpen, setScanOpen] = useState(false);
   const [scanError, setScanError] = useState<string | null>(null);
@@ -321,6 +325,61 @@ export function AttendanceDashboard({ view = "attendance" }: AttendanceDashboard
       setAddingAttendance(false);
     }
   }, [activeElectionId, loadAttendances, recordsPage, selectedVoter]);
+
+  const handleDeleteAttendance = useCallback(async () => {
+    if (deleteConfirmationInput.trim().toUpperCase() !== "DELETE ALL") {
+      setDeleteAttendanceError('Type "DELETE ALL" to confirm.');
+      return;
+    }
+
+    if (!activeElectionId) {
+      setNotice({
+        tone: "warning",
+        message: "No election selected for attendance deletion.",
+      });
+      return;
+    }
+
+    const confirmed = window.confirm("Delete all attendance records for the selected election?");
+    if (!confirmed) {
+      return;
+    }
+
+    try {
+      setDeletingAttendance(true);
+      setDeleteAttendanceError(null);
+      const response = await deleteAttendancesForElection(activeElectionId, "DELETE ALL");
+      setNotice({
+        tone: "success",
+        message: `${response.message} Deleted: ${response.meta.deleted}.`,
+      });
+      setDeleteAttendanceOpen(false);
+      setDeleteConfirmationInput("");
+      await loadAttendances(activeElectionId, recordsPage);
+    } catch (deleteError) {
+      setNotice({
+        tone: "error",
+        message: extractErrorMessage(deleteError),
+      });
+      setDeleteAttendanceError(extractErrorMessage(deleteError));
+    } finally {
+      setDeletingAttendance(false);
+    }
+  }, [activeElectionId, deleteConfirmationInput, loadAttendances, recordsPage]);
+
+  const openDeleteAttendanceDialog = useCallback(() => {
+    if (!activeElectionId) {
+      setNotice({
+        tone: "warning",
+        message: "No election selected for attendance deletion.",
+      });
+      return;
+    }
+
+    setDeleteAttendanceOpen(true);
+    setDeleteConfirmationInput("");
+    setDeleteAttendanceError(null);
+  }, [activeElectionId]);
 
   const openScannerDialog = useCallback(() => {
     setScanOpen(true);
@@ -677,19 +736,41 @@ export function AttendanceDashboard({ view = "attendance" }: AttendanceDashboard
                 <Download className="h-4 w-4" />
                 {exporting ? "Exporting..." : "Export Present Attendance"}
               </Button>
+              <Button
+                type="button"
+                variant="outline"
+                className="inline-flex items-center gap-2"
+                disabled={!activeElectionId}
+                onClick={openDeleteAttendanceDialog}
+              >
+                <Trash2 className="h-4 w-4" />
+                Delete Attendance
+              </Button>
             </div>
           ) : (
-            <Button
-              type="button"
-              className="inline-flex items-center gap-2"
-              disabled={!activeElectionId}
-              onClick={() => {
-                openScannerDialog();
-              }}
-            >
-              <Camera className="h-4 w-4" />
-              Open Attendance Scanner
-            </Button>
+            <div className="flex flex-wrap items-center gap-2">
+              <Button
+                type="button"
+                className="inline-flex items-center gap-2"
+                disabled={!activeElectionId}
+                onClick={() => {
+                  openScannerDialog();
+                }}
+              >
+                <Camera className="h-4 w-4" />
+                Open Attendance Scanner
+              </Button>
+              <Button
+                type="button"
+                variant="outline"
+                className="inline-flex items-center gap-2"
+                disabled={!activeElectionId}
+                onClick={openDeleteAttendanceDialog}
+              >
+                <Trash2 className="h-4 w-4" />
+                Delete Attendance
+              </Button>
+            </div>
           )}
         </CardHeader>
         <CardContent>
@@ -904,6 +985,58 @@ export function AttendanceDashboard({ view = "attendance" }: AttendanceDashboard
               }}
             >
               {addingAttendance ? "Adding..." : "Add Attendance"}
+            </Button>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      <AlertDialog
+        open={deleteAttendanceOpen}
+        onOpenChange={(open) => {
+          setDeleteAttendanceOpen(open);
+          if (!open) {
+            setDeleteConfirmationInput("");
+            setDeleteAttendanceError(null);
+          }
+        }}
+      >
+        <AlertDialogContent className="max-w-md">
+          <AlertDialogHeader>
+            <AlertDialogTitle className="inline-flex items-center gap-2">
+              <Trash2 className="h-4 w-4" />
+              Delete Attendance
+            </AlertDialogTitle>
+            <AlertDialogDescription>
+              This will delete all attendance records for the selected election. Type <span className="font-semibold">DELETE ALL</span> to confirm.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+
+          <div className="space-y-2">
+            <Input
+              value={deleteConfirmationInput}
+              onChange={(event) => {
+                setDeleteConfirmationInput(event.target.value);
+                if (deleteAttendanceError) {
+                  setDeleteAttendanceError(null);
+                }
+              }}
+              placeholder='Type "DELETE ALL"'
+              disabled={deletingAttendance}
+            />
+            {deleteAttendanceError ? <p className="text-sm text-destructive">{deleteAttendanceError}</p> : null}
+          </div>
+
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={deletingAttendance}>Cancel</AlertDialogCancel>
+            <Button
+              type="button"
+              variant="destructive"
+              disabled={deletingAttendance}
+              onClick={() => {
+                void handleDeleteAttendance();
+              }}
+            >
+              {deletingAttendance ? "Deleting..." : "Delete Attendance"}
             </Button>
           </AlertDialogFooter>
         </AlertDialogContent>

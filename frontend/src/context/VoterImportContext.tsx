@@ -146,7 +146,10 @@ export function VoterImportProvider({ children }: { children: React.ReactNode })
         status: "success",
         progress: 100,
         fileName: file.name,
-        message: `Import complete. ${response.meta.created} created, ${response.meta.updated} updated, ${response.meta.total_processed} processed.`,
+        message:
+          typeof response.meta.skipped === "number" && response.meta.skipped > 0
+            ? `Import complete. ${response.meta.created} created, ${response.meta.updated} updated, ${response.meta.total_processed} processed, ${response.meta.skipped} skipped.`
+            : `Import complete. ${response.meta.created} created, ${response.meta.updated} updated, ${response.meta.total_processed} processed.`,
         importId,
         processed: response.meta.total_processed,
         total: response.meta.total_processed,

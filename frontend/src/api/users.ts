@@ -83,6 +83,25 @@ export async function deleteVoter(userId: number) {
   await api.delete(`/voters/${userId}`);
 }
 
+export interface DeleteVotersResponse {
+  message: string;
+  data: {
+    deleted: number;
+    reassigned_elections: number;
+    protected_accounts: string[];
+  };
+}
+
+export async function deleteAllVotersExceptProtected(confirmation: string) {
+  const response = await api.delete<DeleteVotersResponse>("/voters", {
+    data: {
+      confirmation,
+    },
+  });
+
+  return response.data;
+}
+
 function downloadCsvBlob(blobData: BlobPart, fileName: string) {
   const blob = new Blob([blobData], { type: "text/csv;charset=utf-8;" });
   const url = URL.createObjectURL(blob);
@@ -135,7 +154,9 @@ export interface ImportVotersResponse {
     created: number;
     updated: number;
     total_processed: number;
+    skipped?: number;
   };
+  errors?: Array<{ line: number; message: string }>;
 }
 
 export interface VoterImportProgressSnapshot {
@@ -158,6 +179,7 @@ export async function importVoters(file: File, importId: string, onProgress?: (p
   const formData = new FormData();
   formData.append("import_id", importId);
   formData.append("file", file);
+  formData.append("continue_on_error", "1");
 
   const response = await api.post<ImportVotersResponse>("/voters/import", formData, {
     headers: {

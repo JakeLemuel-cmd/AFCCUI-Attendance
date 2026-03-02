@@ -5,6 +5,7 @@ namespace App\Http\Controllers\Api;
 use App\Http\Controllers\Controller;
 use App\Http\Requests\Vote\StoreVoteRequest;
 use App\Http\Resources\VoteReceiptResource;
+use App\Models\Attendance;
 use App\Models\Election;
 use App\Models\User;
 use App\Models\Vote;
@@ -39,7 +40,11 @@ class VoteController extends Controller
 
         $user = $request->user();
 
-        $isPresent = $user->attendance_status === 'present';
+        $isPresent = Attendance::query()
+            ->where('election_id', $election->id)
+            ->where('user_id', $user->id)
+            ->where('status', 'present')
+            ->exists();
 
         if (! $isPresent) {
             return response()->json([
@@ -112,19 +117,35 @@ class VoteController extends Controller
 
         try {
             DB::transaction(function () use ($data, $election, $voterHash, $user): void {
-                $lockedElection = Election::query()
-                    ->whereKey($election->id)
+                $lockedUser = User::query()
+                    ->whereKey($user->id)
                     ->lockForUpdate()
                     ->firstOrFail();
 
-                if (! $lockedElection->isOpen() || $lockedElection->hasEnded()) {
+                $currentElection = Election::query()
+                    ->whereKey($election->id)
+                    ->firstOrFail();
+
+                if (! $currentElection->isOpen() || $currentElection->hasEnded()) {
                     throw ValidationException::withMessages([
                         'election' => ['Voting is not currently available for this election.'],
                     ]);
                 }
 
+                $isStillPresent = Attendance::query()
+                    ->where('election_id', $currentElection->id)
+                    ->where('user_id', $lockedUser->id)
+                    ->where('status', 'present')
+                    ->exists();
+
+                if (! $isStillPresent) {
+                    throw ValidationException::withMessages([
+                        'election' => ['Attendance must be marked as present before voting.'],
+                    ]);
+                }
+
                 if (Vote::query()
-                    ->where('election_id', $lockedElection->id)
+                    ->where('election_id', $currentElection->id)
                     ->where('voter_hash', $voterHash)
                     ->exists()) {
                     throw ValidationException::withMessages([
@@ -134,18 +155,16 @@ class VoteController extends Controller
 
                 foreach ($data['votes'] as $selection) {
                     Vote::create([
-                        'election_id' => $lockedElection->id,
+                        'election_id' => $currentElection->id,
                         'position_id' => (int) $selection['position_id'],
                         'candidate_id' => (int) $selection['candidate_id'],
                         'voter_hash' => $voterHash,
                     ]);
                 }
 
-                User::query()
-                    ->whereKey($user->id)
-                    ->update([
-                        'already_voted' => true,
-                    ]);
+                $lockedUser->forceFill([
+                    'already_voted' => true,
+                ])->save();
             });
         } catch (ValidationException $exception) {
             throw $exception;

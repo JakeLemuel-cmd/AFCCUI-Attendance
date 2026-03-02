@@ -31,13 +31,28 @@ interface UpsertAttendanceResponse {
   data: Attendance;
 }
 
+interface DeleteAttendanceResponse {
+  message: string;
+  data: Attendance;
+}
+
+interface DeleteAttendancesForElectionResponse {
+  message: string;
+  meta: {
+    deleted: number;
+    affected_voters: number;
+  };
+}
+
 interface ImportAttendanceResponse {
   message: string;
   meta: {
     created: number;
     updated: number;
     total_processed: number;
+    skipped?: number;
   };
+  errors?: Array<{ line: number; message: string }>;
 }
 
 interface AttendanceAccessCheckInPayload {
@@ -88,9 +103,31 @@ export async function upsertAttendance(payload: UpsertAttendancePayload) {
   return response.data;
 }
 
+export async function deleteAttendance(userId: number, electionId: number) {
+  const response = await api.delete<DeleteAttendanceResponse>(`/attendances/${userId}`, {
+    params: {
+      election_id: electionId,
+    },
+  });
+
+  return response.data;
+}
+
+export async function deleteAttendancesForElection(electionId: number, confirmation: string) {
+  const response = await api.delete<DeleteAttendancesForElectionResponse>("/attendances", {
+    params: {
+      election_id: electionId,
+      confirmation,
+    },
+  });
+
+  return response.data;
+}
+
 export async function importAttendances(file: File, electionId?: number) {
   const formData = new FormData();
   formData.append("file", file);
+  formData.append("continue_on_error", "1");
   if (typeof electionId === "number") {
     formData.append("election_id", String(electionId));
   }

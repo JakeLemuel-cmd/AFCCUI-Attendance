@@ -123,8 +123,10 @@ export function AttendanceDashboard({ view = "attendance" }: AttendanceDashboard
   const [scanError, setScanError] = useState<string | null>(null);
   const [scanHint, setScanHint] = useState("Allow camera access and point to voter QR code.");
   const [scanValidation, setScanValidation] = useState<ScanValidation | null>(null);
+  const [actionsMenuOpen, setActionsMenuOpen] = useState(false);
 
   const videoRef = useRef<HTMLVideoElement | null>(null);
+  const actionsMenuRef = useRef<HTMLDivElement | null>(null);
   const voterDropdownRef = useRef<HTMLDivElement | null>(null);
   const voterSearchInputRef = useRef<HTMLInputElement | null>(null);
   const qrUploadInputRef = useRef<HTMLInputElement | null>(null);
@@ -595,6 +597,22 @@ export function AttendanceDashboard({ view = "attendance" }: AttendanceDashboard
   }, [addAttendanceOpen, loadVoterOptions, voterSearch]);
 
   useEffect(() => {
+    const handleClickOutside = (event: MouseEvent) => {
+      if (actionsMenuRef.current && !actionsMenuRef.current.contains(event.target as Node)) {
+        setActionsMenuOpen(false);
+      }
+    };
+
+    if (actionsMenuOpen) {
+      document.addEventListener("mousedown", handleClickOutside);
+    }
+
+    return () => {
+      document.removeEventListener("mousedown", handleClickOutside);
+    };
+  }, [actionsMenuOpen]);
+
+  useEffect(() => {
     if (!voterDropdownOpen) {
       return;
     }
@@ -706,46 +724,64 @@ export function AttendanceDashboard({ view = "attendance" }: AttendanceDashboard
             ) : null}
           </div>
           {view === "records" ? (
-            <div className="flex flex-wrap items-center gap-2">
-              <Button
-                type="button"
-                className="inline-flex items-center gap-2"
-                disabled={!activeElectionId}
-                onClick={() => {
-                  setAddAttendanceOpen(true);
-                  setSelectedVoter(null);
-                  setVoterDropdownOpen(false);
-                  setVoterSearch("");
-                  setVoterOptions([]);
-                  setAddAttendanceError(null);
-                  setAddAttendanceLookupError(null);
-                }}
-              >
-                <Plus className="h-4 w-4" />
-                Add Attendance
-              </Button>
+            <div className="relative" ref={actionsMenuRef}>
               <Button
                 type="button"
                 variant="outline"
-                className="inline-flex items-center gap-2"
-                disabled={!activeElectionId || exporting}
+                className="px-4"
                 onClick={() => {
-                  void handleExportPresent();
+                  setActionsMenuOpen((current) => !current);
                 }}
               >
-                <Download className="h-4 w-4" />
-                {exporting ? "Exporting..." : "Export Present Attendance"}
+                ...
               </Button>
-              <Button
-                type="button"
-                variant="outline"
-                className="inline-flex items-center gap-2"
-                disabled={!activeElectionId}
-                onClick={openDeleteAttendanceDialog}
-              >
-                <Trash2 className="h-4 w-4" />
-                Delete Attendance
-              </Button>
+
+              {actionsMenuOpen ? (
+                <div className="absolute right-0 z-20 mt-2 w-60 rounded-md border bg-card p-1 shadow-lg">
+                  <button
+                    type="button"
+                    className="inline-flex w-full items-center gap-2 rounded px-3 py-2 text-left text-sm hover:bg-muted disabled:cursor-not-allowed disabled:opacity-60"
+                    disabled={!activeElectionId}
+                    onClick={() => {
+                      setActionsMenuOpen(false);
+                      setAddAttendanceOpen(true);
+                      setSelectedVoter(null);
+                      setVoterDropdownOpen(false);
+                      setVoterSearch("");
+                      setVoterOptions([]);
+                      setAddAttendanceError(null);
+                      setAddAttendanceLookupError(null);
+                    }}
+                  >
+                    <Plus className="h-4 w-4 text-muted-foreground" />
+                    Add Attendance
+                  </button>
+                  <button
+                    type="button"
+                    className="inline-flex w-full items-center gap-2 rounded px-3 py-2 text-left text-sm hover:bg-muted disabled:cursor-not-allowed disabled:opacity-60"
+                    disabled={!activeElectionId || exporting}
+                    onClick={() => {
+                      setActionsMenuOpen(false);
+                      void handleExportPresent();
+                    }}
+                  >
+                    <Download className="h-4 w-4 text-muted-foreground" />
+                    {exporting ? "Exporting..." : "Export Present Attendance"}
+                  </button>
+                  <button
+                    type="button"
+                    className="inline-flex w-full items-center gap-2 rounded px-3 py-2 text-left text-sm text-destructive hover:bg-destructive/10 disabled:cursor-not-allowed disabled:opacity-60"
+                    disabled={!activeElectionId}
+                    onClick={() => {
+                      setActionsMenuOpen(false);
+                      openDeleteAttendanceDialog();
+                    }}
+                  >
+                    <Trash2 className="h-4 w-4" />
+                    Delete Attendance
+                  </button>
+                </div>
+              ) : null}
             </div>
           ) : (
             <div className="flex flex-wrap items-center gap-2">

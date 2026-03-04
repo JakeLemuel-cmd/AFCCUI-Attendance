@@ -25,7 +25,7 @@ class UpdateCandidateRequest extends FormRequest
             'position_id' => ['sometimes', 'integer', 'exists:positions,id'],
             'name' => ['sometimes', 'string', 'max:255'],
             'photo_path' => ['nullable', 'string', 'max:2048'],
-            'photo' => ['nullable', 'file', 'image', 'mimes:jpg,jpeg,png,webp', 'max:5120'],
+            'photo' => ['nullable', 'file', 'image', 'mimes:jpg,jpeg,png,webp'],
             'bio' => ['nullable', 'string', 'max:5000'],
         ];
     }

@@ -15,6 +15,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { useAuth } from "@/hooks/useAuth";
+import { useAttendanceTask } from "@/hooks/useAttendanceTask";
 import { useVoterImport } from "@/hooks/useVoterImport";
 import type { UserRole } from "@/api/types";
 import coopVoteLogo from "@/assets/coop-vote-logo-cropped.png";
@@ -69,6 +70,16 @@ export function DashboardLayout() {
     isImporting: isVoterImporting,
     clearState: clearVoterImportState,
   } = useVoterImport();
+  const {
+    action: attendanceTaskAction,
+    status: attendanceTaskStatus,
+    progress: attendanceTaskProgress,
+    message: attendanceTaskMessage,
+    processed: attendanceTaskProcessed,
+    total: attendanceTaskTotal,
+    isRunning: isAttendanceTaskRunning,
+    clearState: clearAttendanceTaskState,
+  } = useAttendanceTask();
   const navigate = useNavigate();
   const location = useLocation();
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
@@ -105,6 +116,28 @@ export function DashboardLayout() {
     voterImportStatus === "error"
       ? "border-rose-300 bg-rose-50 text-rose-800"
       : voterImportStatus === "success"
+        ? "border-emerald-300 bg-emerald-50 text-emerald-800"
+        : "border-sky-300 bg-sky-50 text-sky-800";
+  const isAdmin = user.role === "super_admin" || user.role === "election_admin";
+  const showAttendanceTaskBanner = isAdmin && (isAttendanceTaskRunning || attendanceTaskStatus === "success" || attendanceTaskStatus === "error");
+  const attendanceTaskTitle =
+    attendanceTaskAction === "delete"
+      ? isAttendanceTaskRunning
+        ? "Deleting Attendance Data..."
+        : attendanceTaskStatus === "success"
+          ? "Attendance Delete Complete"
+          : "Attendance Delete Failed"
+      : isAttendanceTaskRunning
+        ? attendanceTaskStatus === "uploading"
+          ? "Uploading Attendance Import..."
+          : "Processing Attendance Import..."
+        : attendanceTaskStatus === "success"
+          ? "Attendance Import Complete"
+          : "Attendance Import Failed";
+  const attendanceTaskToneClass =
+    attendanceTaskStatus === "error"
+      ? "border-rose-300 bg-rose-50 text-rose-800"
+      : attendanceTaskStatus === "success"
         ? "border-emerald-300 bg-emerald-50 text-emerald-800"
         : "border-sky-300 bg-sky-50 text-sky-800";
 
@@ -383,6 +416,49 @@ export function DashboardLayout() {
                     className="inline-flex h-6 w-6 items-center justify-center rounded transition-colors hover:bg-black/10"
                     aria-label="Dismiss voter import status"
                     onClick={clearVoterImportState}
+                  >
+                    <X className="h-4 w-4" />
+                  </button>
+                ) : null}
+              </div>
+            </div>
+          </div>
+        ) : null}
+        {showAttendanceTaskBanner ? (
+          <div className="border-b bg-card px-4 py-3 sm:px-6 lg:px-8">
+            <div className={`mx-auto max-w-[1400px] rounded-[10px] border px-3 py-2 ${attendanceTaskToneClass}`}>
+              <div className="flex items-start gap-2">
+                <div className="min-w-0 flex-1">
+                  <p className="text-sm font-semibold">{attendanceTaskTitle}</p>
+                  <p className="text-xs opacity-90">
+                    {attendanceTaskAction === "delete" ? "Attendance delete task" : "Attendance import task"}
+                  </p>
+                  {isAttendanceTaskRunning ? (
+                    <>
+                      <div className="mt-2 h-2 w-full overflow-hidden rounded-full bg-white/70">
+                        <div
+                          className="h-full bg-current transition-[width] duration-150 ease-out"
+                          style={{ width: `${attendanceTaskProgress}%` }}
+                        />
+                      </div>
+                      <p className="mt-1 text-xs">
+                        {attendanceTaskMessage
+                          ? `${attendanceTaskMessage} (${attendanceTaskProgress}%)`
+                          : attendanceTaskTotal > 0
+                            ? `${attendanceTaskProgress}% (${attendanceTaskProcessed}/${attendanceTaskTotal})`
+                            : `${attendanceTaskProgress}%`}
+                      </p>
+                    </>
+                  ) : attendanceTaskMessage ? (
+                    <p className="mt-1 text-xs">{attendanceTaskMessage}</p>
+                  ) : null}
+                </div>
+                {!isAttendanceTaskRunning ? (
+                  <button
+                    type="button"
+                    className="inline-flex h-6 w-6 items-center justify-center rounded transition-colors hover:bg-black/10"
+                    aria-label="Dismiss attendance task status"
+                    onClick={clearAttendanceTaskState}
                   >
                     <X className="h-4 w-4" />
                   </button>

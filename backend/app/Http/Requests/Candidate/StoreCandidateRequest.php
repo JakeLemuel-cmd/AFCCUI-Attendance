@@ -25,7 +25,7 @@ class StoreCandidateRequest extends FormRequest
             'position_id' => ['required', 'integer', 'exists:positions,id'],
             'name' => ['required', 'string', 'max:255'],
             'photo_path' => ['nullable', 'string', 'max:2048'],
-            'photo' => ['nullable', 'file', 'image', 'mimes:jpg,jpeg,png,webp', 'max:5120'],
+            'photo' => ['nullable', 'file', 'image', 'mimes:jpg,jpeg,png,webp'],
             'bio' => ['nullable', 'string', 'max:5000'],
         ];
     }

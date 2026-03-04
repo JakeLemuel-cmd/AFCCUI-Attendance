@@ -38,7 +38,6 @@ type CandidateFormData = z.infer<typeof candidateSchema>;
 
 const API_ORIGIN = import.meta.env.VITE_API_ORIGIN ?? "http://localhost:8000";
 const ACCEPTED_PHOTO_TYPES = ["image/jpeg", "image/png", "image/webp"];
-const MAX_PHOTO_SIZE_BYTES = 5 * 1024 * 1024;
 
 function resolveCandidateImage(photoPath: string | null): string | null {
   if (!photoPath) {
@@ -353,12 +352,6 @@ export function AddCandidatesPage() {
       return;
     }
 
-    if (file.size > MAX_PHOTO_SIZE_BYTES) {
-      setError("Photo must be 5MB or smaller.");
-      event.target.value = "";
-      return;
-    }
-
     if (photoPreview?.startsWith("blob:")) {
       URL.revokeObjectURL(photoPreview);
     }
@@ -381,12 +374,6 @@ export function AddCandidatesPage() {
 
     if (!ACCEPTED_PHOTO_TYPES.includes(file.type)) {
       setError("Photo must be JPG, PNG, or WEBP.");
-      event.target.value = "";
-      return;
-    }
-
-    if (file.size > MAX_PHOTO_SIZE_BYTES) {
-      setError("Photo must be 5MB or smaller.");
       event.target.value = "";
       return;
     }
@@ -710,7 +697,7 @@ export function AddCandidatesPage() {
                   ) : null}
                 </div>
               </div>
-              <p className="text-xs text-muted-foreground">Accepted: JPG, PNG, WEBP. Max size: 5MB.</p>
+              <p className="text-xs text-muted-foreground">Accepted: JPG, PNG, WEBP.</p>
 
               <div className="mt-2 flex items-center gap-3 rounded-lg border border-dashed p-3">
                 {photoPreview ? (
@@ -847,7 +834,7 @@ export function AddCandidatesPage() {
                   ) : null}
                 </div>
               </div>
-              <p className="text-xs text-muted-foreground">Accepted: JPG, PNG, WEBP. Max size: 5MB.</p>
+              <p className="text-xs text-muted-foreground">Accepted: JPG, PNG, WEBP.</p>
 
               <div className="mt-2 flex items-center gap-3 rounded-lg border border-dashed p-3">
                 {editPhotoPreview ? (

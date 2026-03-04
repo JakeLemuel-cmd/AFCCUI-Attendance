@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type ChangeEvent } from "react";
 import type { IScannerControls } from "@zxing/browser";
 import { CalendarCheck2, Camera, ChevronDown, Download, Link as LinkIcon, Plus, Trash2, Upload, UserCheck2, UserX, Users } from "lucide-react";
-import { deleteAttendancesForElection, exportPresentAttendancesCsv, getAttendances, importAttendances, upsertAttendance } from "@/api/attendance";
+import { exportPresentAttendancesCsv, getAttendances, upsertAttendance } from "@/api/attendance";
 import { extractErrorMessage } from "@/api/client";
 import { getElections } from "@/api/elections";
 import { getVoters } from "@/api/users";
@@ -21,6 +21,7 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { useAttendanceTask } from "@/hooks/useAttendanceTask";
 import { cn } from "@/lib/utils";
 
 type ScanValidationTone = "success" | "warning" | "error";
@@ -105,7 +106,6 @@ export function AttendanceDashboard({ view = "attendance" }: AttendanceDashboard
   const [activeElectionStatus, setActiveElectionStatus] = useState<ElectionStatus | null>(null);
   const [notice, setNotice] = useState<{ tone: "error" | "success" | "warning"; message: string } | null>(null);
   const [exporting, setExporting] = useState(false);
-  const [importingAttendance, setImportingAttendance] = useState(false);
   const [addAttendanceOpen, setAddAttendanceOpen] = useState(false);
   const [selectedVoter, setSelectedVoter] = useState<{ voterId: string; label: string } | null>(null);
   const [voterDropdownOpen, setVoterDropdownOpen] = useState(false);
@@ -125,6 +125,10 @@ export function AttendanceDashboard({ view = "attendance" }: AttendanceDashboard
   const [scanHint, setScanHint] = useState("Allow camera access and point to voter QR code.");
   const [scanValidation, setScanValidation] = useState<ScanValidation | null>(null);
   const [actionsMenuOpen, setActionsMenuOpen] = useState(false);
+  const protectedAttendanceEmail = "voter@voting.local";
+  const { startImport, startDelete, action: attendanceTaskAction, status: attendanceTaskStatus, progress: attendanceTaskProgress } =
+    useAttendanceTask();
+  const importingAttendance = attendanceTaskAction === "import" && (attendanceTaskStatus === "uploading" || attendanceTaskStatus === "processing");
 
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const actionsMenuRef = useRef<HTMLDivElement | null>(null);
@@ -272,10 +276,10 @@ export function AttendanceDashboard({ view = "attendance" }: AttendanceDashboard
 
   const handleImportAttendance = useCallback(
     async (event: ChangeEvent<HTMLInputElement>) => {
-      const file = event.target.files?.[0];
+      const files = Array.from(event.target.files ?? []);
       event.target.value = "";
 
-      if (!file) {
+      if (files.length === 0) {
         return;
       }
 
@@ -288,29 +292,65 @@ export function AttendanceDashboard({ view = "attendance" }: AttendanceDashboard
       }
 
       try {
-        setImportingAttendance(true);
-        const response = await importAttendances(file, activeElectionId);
-        await loadAttendances(activeElectionId, recordsPage);
+        let importedFileCount = 0;
+        let totalCreated = 0;
+        let totalUpdated = 0;
+        let totalProcessed = 0;
+        let totalSkipped = 0;
+        let firstCsvIssue: string | null = null;
+        let firstFailedFileError: string | null = null;
 
-        const skipped = response.meta.skipped ?? 0;
-        const firstError = response.errors?.[0]
-          ? ` First issue: line ${response.errors[0].line} - ${response.errors[0].message}`
-          : "";
+        for (const file of files) {
+          try {
+            const response = await startImport(file, activeElectionId);
+            importedFileCount += 1;
+            totalCreated += response.meta.created;
+            totalUpdated += response.meta.updated;
+            totalProcessed += response.meta.total_processed;
+            totalSkipped += response.meta.skipped ?? 0;
+
+            if (!firstCsvIssue && response.errors?.[0]) {
+              firstCsvIssue = `line ${response.errors[0].line} - ${response.errors[0].message}`;
+            }
+          } catch (importError) {
+            if (!firstFailedFileError) {
+              firstFailedFileError = `${file.name}: ${extractErrorMessage(importError)}`;
+            }
+          }
+        }
+
+        if (importedFileCount > 0) {
+          await loadAttendances(activeElectionId, recordsPage);
+        }
+
+        if (importedFileCount === 0) {
+          setNotice({
+            tone: "error",
+            message: firstFailedFileError ?? "No files were imported.",
+          });
+          return;
+        }
+
+        const summaryPrefix =
+          files.length > 1
+            ? `Imported ${importedFileCount}/${files.length} file(s).`
+            : "Attendance import completed.";
+        const firstIssueText = firstCsvIssue ? ` First issue: ${firstCsvIssue}.` : "";
+        const failureText = firstFailedFileError ? ` First failed file: ${firstFailedFileError}` : "";
+        const tone: "success" | "warning" = totalSkipped > 0 || importedFileCount < files.length ? "warning" : "success";
 
         setNotice({
-          tone: skipped > 0 ? "warning" : "success",
-          message: `${response.message} Processed: ${response.meta.total_processed}. Updated: ${response.meta.updated}. Skipped: ${skipped}.${firstError}`,
+          tone,
+          message: `${summaryPrefix} Processed: ${totalProcessed}. Updated: ${totalUpdated}. Created: ${totalCreated}. Skipped: ${totalSkipped}.${firstIssueText}${failureText}`,
         });
       } catch (importError) {
         setNotice({
           tone: "error",
           message: extractErrorMessage(importError),
         });
-      } finally {
-        setImportingAttendance(false);
       }
     },
-    [activeElectionId, loadAttendances, recordsPage]
+    [activeElectionId, loadAttendances, recordsPage, startImport]
   );
 
   const loadVoterOptions = useCallback(
@@ -320,7 +360,12 @@ export function AttendanceDashboard({ view = "attendance" }: AttendanceDashboard
         setAddAttendanceLookupError(null);
 
         const response = await getVoters(1, 200, searchTerm, activeElectionId ?? undefined);
-        setVoterOptions(response.data.filter((voter) => Boolean(voter.voter_id)));
+        setVoterOptions(
+          response.data.filter((voter) => {
+            const email = voter.email ? voter.email.trim().toLowerCase() : "";
+            return Boolean(voter.voter_id) && email !== protectedAttendanceEmail;
+          })
+        );
       } catch (loadVotersError) {
         setAddAttendanceLookupError(extractErrorMessage(loadVotersError));
       } finally {
@@ -398,7 +443,7 @@ export function AttendanceDashboard({ view = "attendance" }: AttendanceDashboard
     try {
       setDeletingAttendance(true);
       setDeleteAttendanceError(null);
-      const response = await deleteAttendancesForElection(activeElectionId, "DELETE ALL");
+      const response = await startDelete(activeElectionId, "DELETE ALL");
       const deletedUsers = response.meta.deleted_users ?? 0;
       setNotice({
         tone: "success",
@@ -416,7 +461,7 @@ export function AttendanceDashboard({ view = "attendance" }: AttendanceDashboard
     } finally {
       setDeletingAttendance(false);
     }
-  }, [activeElectionId, deleteConfirmationInput, loadAttendances, recordsPage]);
+  }, [activeElectionId, deleteConfirmationInput, loadAttendances, recordsPage, startDelete]);
 
   const openDeleteAttendanceDialog = useCallback(() => {
     if (!activeElectionId) {
@@ -777,6 +822,7 @@ export function AttendanceDashboard({ view = "attendance" }: AttendanceDashboard
             ref={attendanceImportInputRef}
             type="file"
             accept=".csv,text/csv,.txt,text/plain"
+            multiple
             className="hidden"
             onChange={(event) => {
               void handleImportAttendance(event);
@@ -825,7 +871,7 @@ export function AttendanceDashboard({ view = "attendance" }: AttendanceDashboard
                     }}
                   >
                     <Upload className="h-4 w-4 text-muted-foreground" />
-                    {importingAttendance ? "Importing..." : "Import Attendance"}
+                    {importingAttendance ? `Importing... ${attendanceTaskProgress}%` : "Import Attendance"}
                   </button>
                   <button
                     type="button"

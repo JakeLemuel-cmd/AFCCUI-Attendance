@@ -36,7 +36,7 @@ interface DeleteAttendanceResponse {
   data: Attendance;
 }
 
-interface DeleteAttendancesForElectionResponse {
+export interface DeleteAttendancesForElectionResponse {
   message: string;
   meta: {
     deleted: number;
@@ -46,7 +46,7 @@ interface DeleteAttendancesForElectionResponse {
   };
 }
 
-interface ImportAttendanceResponse {
+export interface ImportAttendanceResponse {
   message: string;
   meta: {
     created: number;
@@ -86,6 +86,18 @@ export interface AttendanceAccessCheckInResponse {
   };
 }
 
+export interface AttendanceTaskProgressSnapshot {
+  task_id: string;
+  action: "import" | "delete" | string;
+  status: "uploading" | "processing" | "deleting" | "completed" | "failed" | string;
+  percent: number;
+  message: string;
+  processed: number;
+  total: number;
+  meta?: Record<string, unknown> | null;
+  updated_at: string;
+}
+
 export async function getAttendances(params: GetAttendancesParams) {
   const response = await api.get<GetAttendancesResponse>("/attendances", {
     params: {
@@ -115,31 +127,57 @@ export async function deleteAttendance(userId: number, electionId: number) {
   return response.data;
 }
 
-export async function deleteAttendancesForElection(electionId: number, confirmation: string) {
+export async function deleteAttendancesForElection(electionId: number, confirmation: string, taskId?: string) {
   const response = await api.delete<DeleteAttendancesForElectionResponse>("/attendances", {
     params: {
       election_id: electionId,
       confirmation,
+      task_id: taskId || undefined,
     },
   });
 
   return response.data;
 }
 
-export async function importAttendances(file: File, electionId?: number) {
+export async function importAttendances(
+  file: File,
+  electionId?: number,
+  taskId?: string,
+  onUploadProgress?: (percent: number) => void
+) {
   const formData = new FormData();
   formData.append("file", file);
   formData.append("continue_on_error", "1");
   if (typeof electionId === "number") {
     formData.append("election_id", String(electionId));
   }
+  if (taskId) {
+    formData.append("task_id", taskId);
+  }
 
   const response = await api.post<ImportAttendanceResponse>("/attendances/import", formData, {
     headers: {
       "Content-Type": "multipart/form-data",
     },
+    onUploadProgress: onUploadProgress
+      ? (event) => {
+          const total = typeof event.total === "number" && event.total > 0 ? event.total : file.size;
+          if (total <= 0) {
+            return;
+          }
+
+          const loaded = Math.min(Math.max(event.loaded ?? 0, 0), total);
+          const percent = Math.round((loaded / total) * 1000) / 10;
+          onUploadProgress(Math.max(0, Math.min(100, percent)));
+        }
+      : undefined,
   });
 
+  return response.data;
+}
+
+export async function getAttendanceTaskProgress(taskId: string) {
+  const response = await api.get<AttendanceTaskProgressSnapshot>(`/attendances/progress/${encodeURIComponent(taskId)}`);
   return response.data;
 }
 

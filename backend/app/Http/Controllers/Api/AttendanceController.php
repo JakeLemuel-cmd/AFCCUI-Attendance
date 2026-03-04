@@ -15,7 +15,9 @@ use Illuminate\Database\Eloquent\Collection as EloquentCollection;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Http\UploadedFile;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Str;
 
@@ -316,18 +318,59 @@ class AttendanceController extends Controller
 
     public function destroyMany(Request $request): JsonResponse
     {
+        if (function_exists('set_time_limit')) {
+            @set_time_limit(0);
+        }
+        if (function_exists('ignore_user_abort')) {
+            @ignore_user_abort(true);
+        }
+
         $data = $request->validate([
             'election_id' => ['required', 'integer', 'exists:elections,id'],
             'confirmation' => ['required', 'string', 'max:50'],
+            'task_id' => ['nullable', 'string', 'max:120'],
         ]);
+        $taskId = isset($data['task_id']) ? trim((string) $data['task_id']) : '';
+        if ($taskId !== '') {
+            $this->setAttendanceTaskProgress($taskId, [
+                'action' => 'delete',
+                'status' => 'deleting',
+                'percent' => 5,
+                'message' => 'Preparing attendance deletion...',
+                'processed' => 0,
+                'total' => 0,
+            ]);
+        }
 
         if (strtoupper(trim((string) $data['confirmation'])) !== 'DELETE ALL') {
+            if ($taskId !== '') {
+                $this->setAttendanceTaskProgress($taskId, [
+                    'action' => 'delete',
+                    'status' => 'failed',
+                    'percent' => 100,
+                    'message' => 'Confirmation text must be exactly "DELETE ALL".',
+                    'processed' => 0,
+                    'total' => 0,
+                ]);
+            }
+
             return response()->json([
                 'message' => 'Confirmation text must be exactly "DELETE ALL".',
             ], 422);
         }
 
         $electionId = (int) $data['election_id'];
+        if ($taskId !== '') {
+            $this->setAttendanceTaskProgress($taskId, [
+                'action' => 'delete',
+                'status' => 'deleting',
+                'percent' => 15,
+                'message' => 'Loading protected accounts...',
+                'processed' => 0,
+                'total' => 0,
+            ]);
+        }
+
         $protectedEmails = $this->bulkDeleteProtectedEmails();
         $protectedVoterIds = User::query()
             ->where('role', UserRole::VOTER->value)
@@ -342,12 +385,23 @@ class AttendanceController extends Controller
             ->all();
 
         if (count($protectedVoterIds) === 0) {
+            if ($taskId !== '') {
+                $this->setAttendanceTaskProgress($taskId, [
+                    'action' => 'delete',
+                    'status' => 'failed',
+                    'percent' => 100,
+                    'message' => 'No protected voter account was found. Bulk delete was cancelled.',
+                    'processed' => 0,
+                    'total' => 0,
+                ]);
+            }
+
             return response()->json([
                 'message' => 'No protected voter account was found. Bulk delete was cancelled.',
             ], 422);
         }
 
-        [$deletedCount, $deletedUserCount, $affectedUserCount] = DB::transaction(function () use ($electionId, $protectedVoterIds): array {
+        [$deletedCount, $deletedUserCount, $affectedUserCount] = DB::transaction(function () use ($electionId, $protectedVoterIds, $taskId): array {
             $affectedUserIds = Attendance::query()
                 ->where('election_id', $electionId)
                 ->select('user_id')
@@ -356,11 +410,33 @@ class AttendanceController extends Controller
                 ->map(fn ($userId): int => (int) $userId)
                 ->all();
 
+            if ($taskId !== '') {
+                $this->setAttendanceTaskProgress($taskId, [
+                    'action' => 'delete',
+                    'status' => 'deleting',
+                    'percent' => 35,
+                    'message' => 'Deleting attendance records...',
+                    'processed' => 0,
+                    'total' => count($affectedUserIds),
+                ]);
+            }
+
             $deletedCount = Attendance::query()
                 ->where('election_id', $electionId)
                 ->delete();
 
             if ($affectedUserIds !== []) {
+                if ($taskId !== '') {
+                    $this->setAttendanceTaskProgress($taskId, [
+                        'action' => 'delete',
+                        'status' => 'deleting',
+                        'percent' => 55,
+                        'message' => 'Updating voter attendance status...',
+                        'processed' => 0,
+                        'total' => count($affectedUserIds),
+                    ]);
+                }
+
                 User::query()
                     ->whereIn('id', $affectedUserIds)
                     ->update([
@@ -390,6 +466,17 @@ class AttendanceController extends Controller
                 ->whereNotIn('id', $protectedVoterIds);
             $deletedUserCount = (int) (clone $deleteUserQuery)->count();
 
+            if ($taskId !== '') {
+                $this->setAttendanceTaskProgress($taskId, [
+                    'action' => 'delete',
+                    'status' => 'deleting',
+                    'percent' => 80,
+                    'message' => 'Deleting voter accounts...',
+                    'processed' => 0,
+                    'total' => $deletedUserCount,
+                ]);
+            }
+
             if ($deletedUserCount > 0) {
                 $deleteUserQuery->delete();
             }
@@ -398,6 +485,22 @@ class AttendanceController extends Controller
         });
 
         if ($deletedCount === 0 && $deletedUserCount === 0) {
+            if ($taskId !== '') {
+                $this->setAttendanceTaskProgress($taskId, [
+                    'action' => 'delete',
+                    'status' => 'completed',
+                    'percent' => 100,
+                    'message' => 'No attendance records or voter accounts found to delete.',
+                    'processed' => 0,
+                    'total' => 0,
+                    'meta' => [
+                        'deleted' => 0,
+                        'deleted_users' => 0,
+                        'affected_voters' => 0,
+                    ],
+                ]);
+            }
+
             return response()->json([
                 'message' => 'No attendance records or voter accounts found to delete.',
                 'meta' => [
@@ -415,6 +518,22 @@ class AttendanceController extends Controller
             "Bulk attendance delete completed for election #{$electionId}. Attendance deleted: {$deletedCount}, Voters deleted: {$deletedUserCount}, Affected voters: {$affectedUserCount}."
         );
 
+        if ($taskId !== '') {
+            $this->setAttendanceTaskProgress($taskId, [
+                'action' => 'delete',
+                'status' => 'completed',
+                'percent' => 100,
+                'message' => 'Attendance deletion complete.',
+                'processed' => $deletedUserCount,
+                'total' => $deletedUserCount,
+                'meta' => [
+                    'deleted' => $deletedCount,
+                    'deleted_users' => $deletedUserCount,
+                    'affected_voters' => $affectedUserCount,
+                ],
+            ]);
+        }
+
         return response()->json([
             'message' => 'Attendance records were deleted and voter accounts were cleaned up. Protected accounts were kept.',
             'meta' => [
@@ -426,13 +545,54 @@ class AttendanceController extends Controller
         ]);
     }
 
+    public function taskProgress(string $taskId): JsonResponse
+    {
+        $normalizedTaskId = trim($taskId);
+        if ($normalizedTaskId === '') {
+            return response()->json([
+                'message' => 'Task ID is required.',
+            ], 422);
+        }
+
+        $snapshot = Cache::get($this->attendanceTaskProgressCacheKey($normalizedTaskId));
+        if (! is_array($snapshot)) {
+            return response()->json([
+                'message' => 'Attendance task progress not found.',
+            ], 404);
+        }
+
+        return response()->json($snapshot);
+    }
+
     public function import(Request $request): JsonResponse
     {
+        if (function_exists('set_time_limit')) {
+            @set_time_limit(0);
+        }
+        if (function_exists('ignore_user_abort')) {
+            @ignore_user_abort(true);
+        }
+        @ini_set('upload_max_filesize', '0');
+        @ini_set('post_max_size', '0');
+
         $data = $request->validate([
             'election_id' => ['nullable', 'integer', 'exists:elections,id'],
-            'file' => ['required', 'file', 'mimes:csv,txt', 'max:5120'],
+            'file' => ['required', 'file', 'mimes:csv,txt'],
             'continue_on_error' => ['nullable', 'boolean'],
+            'task_id' => ['nullable', 'string', 'max:120'],
         ]);
+        $taskId = isset($data['task_id']) ? trim((string) $data['task_id']) : '';
+        if ($taskId !== '') {
+            $this->setAttendanceTaskProgress($taskId, [
+                'action' => 'import',
+                'status' => 'processing',
+                'percent' => 5,
+                'message' => 'Reading attendance file...',
+                'processed' => 0,
+                'total' => 0,
+            ]);
+        }
+
         $electionId = isset($data['election_id']) ? (int) $data['election_id'] : null;
         $continueOnError = $request->boolean('continue_on_error', true);
 
@@ -441,35 +601,135 @@ class AttendanceController extends Controller
         $rows = $this->readCsvFile($file);
 
         if (count($rows) < 2) {
+            if ($taskId !== '') {
+                $this->setAttendanceTaskProgress($taskId, [
+                    'action' => 'import',
+                    'status' => 'failed',
+                    'percent' => 100,
+                    'message' => 'The CSV file must include a header row and at least one attendance row.',
+                    'processed' => 0,
+                    'total' => 0,
+                ]);
+            }
+
             return response()->json([
                 'message' => 'The CSV file must include a header row and at least one attendance row.',
             ], 422);
         }
 
         $headers = array_map(
-            fn ($header): string => Str::snake(trim((string) preg_replace('/^\xEF\xBB\xBF/', '', (string) $header))),
+            fn ($header): string => $this->normalizeCsvHeader((string) $header),
             $rows[0]
         );
 
         if (! in_array('name', $headers, true)) {
+            if ($taskId !== '') {
+                $this->setAttendanceTaskProgress($taskId, [
+                    'action' => 'import',
+                    'status' => 'failed',
+                    'percent' => 100,
+                    'message' => 'CSV must contain a NAME column.',
+                    'processed' => 0,
+                    'total' => max(count($rows) - 1, 0),
+                ]);
+            }
+
             return response()->json([
                 'message' => 'CSV must contain a NAME column.',
             ], 422);
         }
 
         $payloads = [];
+        $deferredPayloads = [];
+        $pendingUsersByNameKey = [];
         $errors = [];
+        $totalRows = max(count($rows) - 1, 0);
+        $processedRows = 0;
+        $rowProgressBatchSize = 25;
+        $lastRowProgressPercent = 0;
+        $createdUsers = 0;
+        $importChunkSize = 500;
+        $normalizeNameKey = static function (string $value): string {
+            $normalizedName = preg_replace('/\s+/', ' ', trim($value));
+            $normalizedName = is_string($normalizedName) ? trim($normalizedName) : trim($value);
 
-        foreach (array_slice($rows, 1) as $index => $rowValues) {
-            $line = $index + 2;
+            return Str::lower($normalizedName);
+        };
+
+        $matchedVotersByName = [];
+        $matchedVotersQuery = User::query()
+            ->select(['id', 'name'])
+            ->where('role', UserRole::VOTER->value)
+            ->orderBy('id');
+        $this->applyProtectedVoterExclusion($matchedVotersQuery);
+        $matchedVotersQuery->chunkById(2000, function (EloquentCollection $matchedVotersChunk) use (&$matchedVotersByName, $normalizeNameKey): void {
+            foreach ($matchedVotersChunk as $matchedVoter) {
+                $nameKey = $normalizeNameKey((string) $matchedVoter->name);
+                if ($nameKey === '' || isset($matchedVotersByName[$nameKey])) {
+                    continue;
+                }
+
+                $matchedVotersByName[$nameKey] = (int) $matchedVoter->id;
+            }
+        }, 'id');
+
+        $updateLoopProgress = function () use (
+            $taskId,
+            &$processedRows,
+            $totalRows,
+            $rowProgressBatchSize,
+            &$lastRowProgressPercent
+        ): void {
+            if ($taskId === '') {
+                return;
+            }
+
+            if ($processedRows !== $totalRows && ($processedRows % $rowProgressBatchSize !== 0)) {
+                return;
+            }
+
+            $safeTotal = max(1, $totalRows);
+            $percent = min(85, 10 + (int) floor(($processedRows / $safeTotal) * 75));
+            if ($processedRows !== $totalRows && $percent <= $lastRowProgressPercent) {
+                return;
+            }
+
+            $lastRowProgressPercent = $percent;
+            $this->setAttendanceTaskProgress($taskId, [
+                'action' => 'import',
+                'status' => 'processing',
+                'percent' => $percent,
+                'message' => "Validating attendance rows... {$processedRows}/{$totalRows}",
+                'processed' => $processedRows,
+                'total' => $totalRows,
+            ]);
+        };
+
+        foreach ($rows as $index => $rowValues) {
+            if ($index === 0) {
+                continue;
+            }
+
+            $processedRows++;
+            $line = $index + 1;
             $row = [];
 
             foreach ($headers as $position => $header) {
-                $row[$header] = isset($rowValues[$position]) ? trim((string) $rowValues[$position]) : null;
+                $rawValue = isset($rowValues[$position]) ? (string) $rowValues[$position] : '';
+                $normalizedValue = $this->normalizeCsvValue($rawValue);
+                $row[$header] = $normalizedValue !== '' ? $normalizedValue : null;
             }
 
-            $isEmptyRow = collect($row)->every(fn ($value): bool => $value === null || $value === '');
+            $isEmptyRow = true;
+            foreach ($row as $value) {
+                if ($value !== null && $value !== '') {
+                    $isEmptyRow = false;
+
+                    break;
+                }
+            }
             if ($isEmptyRow) {
+                $updateLoopProgress();
                 continue;
             }
 
@@ -480,82 +740,280 @@ class AttendanceController extends Controller
                     'message' => 'NAME is required.',
                 ];
 
+                $updateLoopProgress();
                 continue;
             }
 
             $normalizedName = preg_replace('/\s+/', ' ', $name);
             $normalizedName = is_string($normalizedName) ? trim($normalizedName) : $name;
+            $normalizedNameKey = $normalizeNameKey($normalizedName);
+            $matchedVoterId = $normalizedNameKey !== '' ? ($matchedVotersByName[$normalizedNameKey] ?? null) : null;
 
-            $matchedVotersQuery = User::query()
-                ->select(['id'])
-                ->where('role', UserRole::VOTER->value);
-            $this->applyProtectedVoterExclusion($matchedVotersQuery);
+            if ($matchedVoterId === null) {
+                $branch = isset($row['branch']) ? trim((string) $row['branch']) : '';
+                if (! isset($pendingUsersByNameKey[$normalizedNameKey])) {
+                    $pendingUsersByNameKey[$normalizedNameKey] = [
+                        'line' => $line,
+                        'name' => $normalizedName,
+                        'branch' => $branch !== '' ? $branch : null,
+                    ];
+                }
 
-            $matchedVoters = $matchedVotersQuery
-                ->whereRaw('LOWER(TRIM(name)) = ?', [Str::lower($normalizedName)])
-                ->limit(2)
-                ->get();
-
-            if ($matchedVoters->isEmpty()) {
-                $errors[] = [
+                $deferredPayloads[] = [
                     'line' => $line,
-                    'message' => 'Voter name was not found.',
+                    'name_key' => $normalizedNameKey,
                 ];
 
-                continue;
-            }
-
-            if ($matchedVoters->count() > 1) {
-                $errors[] = [
-                    'line' => $line,
-                    'message' => 'Multiple voters matched NAME. Please use a unique voter name.',
-                ];
-
+                $updateLoopProgress();
                 continue;
             }
 
             $payloads[] = [
-                'user_id' => (int) $matchedVoters->first()->id,
+                'user_id' => $matchedVoterId,
                 'status' => AttendanceStatus::PRESENT->value,
             ];
+
+            $updateLoopProgress();
+        }
+
+        if ($pendingUsersByNameKey !== []) {
+            if ($taskId !== '') {
+                $this->setAttendanceTaskProgress($taskId, [
+                    'action' => 'import',
+                    'status' => 'processing',
+                    'percent' => 88,
+                    'message' => 'Creating missing voters...',
+                    'processed' => $processedRows,
+                    'total' => $totalRows,
+                ]);
+            }
+
+            $defaultPasswordHash = Hash::make('Password@123');
+            $createdNameKeys = [];
+            $timestamp = now();
+
+            foreach (array_chunk(array_keys($pendingUsersByNameKey), $importChunkSize) as $chunkNameKeys) {
+                $chunkRows = [];
+                foreach ($chunkNameKeys as $chunkNameKey) {
+                    $pendingUser = $pendingUsersByNameKey[$chunkNameKey];
+                    $chunkRows[] = [
+                        'name' => (string) $pendingUser['name'],
+                        'branch' => $pendingUser['branch'],
+                        'email' => null,
+                        'voter_id' => null,
+                        'voter_key' => null,
+                        'password' => $defaultPasswordHash,
+                        'role' => UserRole::VOTER->value,
+                        'is_active' => true,
+                        'attendance_status' => AttendanceStatus::ABSENT->value,
+                        'already_voted' => false,
+                        'created_at' => $timestamp,
+                        'updated_at' => $timestamp,
+                    ];
+                }
+
+                try {
+                    User::query()->insert($chunkRows);
+                    $createdUsers += count($chunkRows);
+                    foreach ($chunkNameKeys as $chunkNameKey) {
+                        $createdNameKeys[$chunkNameKey] = true;
+                    }
+                } catch (\Throwable) {
+                    foreach ($chunkNameKeys as $chunkNameKey) {
+                        $pendingUser = $pendingUsersByNameKey[$chunkNameKey];
+                        try {
+                            User::query()->insert([[
+                                'name' => (string) $pendingUser['name'],
+                                'branch' => $pendingUser['branch'],
+                                'email' => null,
+                                'voter_id' => null,
+                                'voter_key' => null,
+                                'password' => $defaultPasswordHash,
+                                'role' => UserRole::VOTER->value,
+                                'is_active' => true,
+                                'attendance_status' => AttendanceStatus::ABSENT->value,
+                                'already_voted' => false,
+                                'created_at' => $timestamp,
+                                'updated_at' => $timestamp,
+                            ]]);
+                            $createdUsers++;
+                            $createdNameKeys[$chunkNameKey] = true;
+                        } catch (\Throwable) {
+                            // Resolution below will mark all rows using this NAME as skipped.
+                        }
+                    }
+                }
+            }
+
+            if ($createdNameKeys !== []) {
+                $createdNames = [];
+                foreach (array_keys($createdNameKeys) as $createdNameKey) {
+                    $createdNames[] = (string) $pendingUsersByNameKey[$createdNameKey]['name'];
+                }
+                $createdNames = array_values(array_unique($createdNames));
+                $createdNameKeyLookup = array_fill_keys(array_keys($createdNameKeys), true);
+
+                foreach (array_chunk($createdNames, $importChunkSize) as $createdNameChunk) {
+                    $createdUsersQuery = User::query()
+                        ->select(['id', 'name'])
+                        ->where('role', UserRole::VOTER->value)
+                        ->whereIn('name', $createdNameChunk)
+                        ->orderBy('id');
+                    $this->applyProtectedVoterExclusion($createdUsersQuery);
+
+                    foreach ($createdUsersQuery->get() as $createdVoter) {
+                        $createdNameKey = $normalizeNameKey((string) $createdVoter->name);
+                        if (! isset($createdNameKeyLookup[$createdNameKey]) || isset($matchedVotersByName[$createdNameKey])) {
+                            continue;
+                        }
+
+                        $matchedVotersByName[$createdNameKey] = (int) $createdVoter->id;
+                    }
+                }
+            }
+
+            foreach ($deferredPayloads as $deferredPayload) {
+                $nameKey = (string) $deferredPayload['name_key'];
+                $matchedVoterId = $matchedVotersByName[$nameKey] ?? null;
+                if (! is_int($matchedVoterId)) {
+                    $errors[] = [
+                        'line' => (int) $deferredPayload['line'],
+                        'message' => 'Unable to create attendance user from NAME. Check CSV text encoding (UTF-8 recommended).',
+                    ];
+
+                    continue;
+                }
+
+                $payloads[] = [
+                    'user_id' => $matchedVoterId,
+                    'status' => AttendanceStatus::PRESENT->value,
+                ];
+            }
         }
 
         $skipped = count($errors);
 
         if (count($errors) > 0 && ! $continueOnError) {
+            if ($taskId !== '') {
+                $this->setAttendanceTaskProgress($taskId, [
+                    'action' => 'import',
+                    'status' => 'failed',
+                    'percent' => 100,
+                    'message' => 'Attendance import failed due to CSV validation errors.',
+                    'processed' => $processedRows,
+                    'total' => $totalRows,
+                ]);
+            }
+
             return response()->json([
                 'message' => 'Attendance import failed due to CSV validation errors.',
                 'errors' => $errors,
             ], 422);
         }
 
-        $updated = 0;
+        if (count($payloads) === 0) {
+            $firstError = $errors[0] ?? null;
+            $firstErrorMessage = '';
+            if (is_array($firstError) && isset($firstError['message'])) {
+                $linePrefix = isset($firstError['line']) ? "Line {$firstError['line']}: " : '';
+                $firstErrorMessage = $linePrefix.(string) $firstError['message'];
+            }
+            $noImportMessage = $firstErrorMessage !== ''
+                ? "No attendance rows were imported. {$firstErrorMessage}"
+                : 'No attendance rows were imported. All rows were skipped.';
 
-        DB::transaction(function () use ($payloads, $electionId, &$updated): void {
-            foreach ($payloads as $payload) {
-                if ($electionId !== null) {
-                    Attendance::query()->updateOrCreate(
-                        [
+            if ($taskId !== '') {
+                $this->setAttendanceTaskProgress($taskId, [
+                    'action' => 'import',
+                    'status' => 'failed',
+                    'percent' => 100,
+                    'message' => $noImportMessage,
+                    'processed' => 0,
+                    'total' => $totalRows,
+                ]);
+            }
+
+            return response()->json([
+                'message' => $noImportMessage,
+                'meta' => [
+                    'created' => 0,
+                    'updated' => 0,
+                    'total_processed' => 0,
+                    'skipped' => $skipped,
+                ],
+                'errors' => $errors,
+            ], 422);
+        }
+
+        $uniqueUserIds = array_values(array_unique(array_map(
+            static fn (array $payload): int => (int) ($payload['user_id'] ?? 0),
+            $payloads
+        )));
+        $uniqueUserIds = array_values(array_filter($uniqueUserIds, static fn (int $userId): bool => $userId > 0));
+        $updated = count($uniqueUserIds);
+        if ($taskId !== '') {
+            $this->setAttendanceTaskProgress($taskId, [
+                'action' => 'import',
+                'status' => 'processing',
+                'percent' => 90,
+                'message' => 'Applying attendance updates...',
+                'processed' => 0,
+                'total' => count($payloads),
+            ]);
+        }
+
+        $payloadTotal = count($payloads);
+        $updateChunkSize = $importChunkSize;
+        DB::transaction(function () use ($payloads, $electionId, $uniqueUserIds, $taskId, $payloadTotal, $updateChunkSize): void {
+            $timestamp = now();
+
+            if ($electionId !== null && $payloads !== []) {
+                $attendanceRows = array_map(
+                    static function (array $payload) use ($electionId, $timestamp): array {
+                        $isPresent = (string) ($payload['status'] ?? '') === AttendanceStatus::PRESENT->value;
+
+                        return [
                             'election_id' => $electionId,
-                            'user_id' => $payload['user_id'],
-                        ],
-                        [
-                            'status' => $payload['status'],
-                            'checked_in_at' => $payload['status'] === AttendanceStatus::PRESENT->value ? now() : null,
+                            'user_id' => (int) $payload['user_id'],
+                            'status' => (string) $payload['status'],
+                            'checked_in_at' => $isPresent ? $timestamp : null,
                             'source' => 'import',
-                        ]
+                            'created_at' => $timestamp,
+                            'updated_at' => $timestamp,
+                        ];
+                    },
+                    $payloads
+                );
+
+                $processedPayloads = 0;
+                foreach (array_chunk($attendanceRows, $updateChunkSize) as $chunkRows) {
+                    Attendance::query()->upsert(
+                        $chunkRows,
+                        ['election_id', 'user_id'],
+                        ['status', 'checked_in_at', 'source', 'updated_at']
                     );
-                }
 
-                $affected = User::query()
-                    ->whereKey($payload['user_id'])
+                    $processedPayloads += count($chunkRows);
+                    if ($taskId !== '' && $payloadTotal > 0) {
+                        $percent = min(98, 90 + (int) floor(($processedPayloads / $payloadTotal) * 8));
+                        $this->setAttendanceTaskProgress($taskId, [
+                            'action' => 'import',
+                            'status' => 'processing',
+                            'percent' => $percent,
+                            'message' => 'Applying attendance updates...',
+                            'processed' => min($processedPayloads, $payloadTotal),
+                            'total' => $payloadTotal,
+                        ]);
+                    }
+                }
+            }
+
+            foreach (array_chunk($uniqueUserIds, $updateChunkSize) as $chunkUserIds) {
+                User::query()
+                    ->whereIn('id', $chunkUserIds)
                     ->update([
-                        'attendance_status' => $payload['status'],
+                        'attendance_status' => AttendanceStatus::PRESENT->value,
                     ]);
-
-                if ($affected > 0) {
-                    $updated++;
-                }
             }
         });
 
@@ -565,18 +1023,32 @@ class AttendanceController extends Controller
             "Attendance import completed for election #".($electionId ?? 0).". Updated: {$updated}, Processed: ".count($payloads).", Skipped: {$skipped}."
         );
 
-        return response()->json([
+        $response = [
             'message' => $continueOnError && $skipped > 0
                 ? 'Attendance imported with skipped rows. Review errors for details.'
                 : 'Attendance imported successfully.',
             'meta' => [
-                'created' => 0,
+                'created' => $createdUsers,
                 'updated' => $updated,
                 'total_processed' => count($payloads),
                 'skipped' => $skipped,
             ],
             'errors' => $continueOnError ? $errors : [],
-        ]);
+        ];
+
+        if ($taskId !== '') {
+            $this->setAttendanceTaskProgress($taskId, [
+                'action' => 'import',
+                'status' => 'completed',
+                'percent' => 100,
+                'message' => (string) $response['message'],
+                'processed' => (int) $response['meta']['total_processed'],
+                'total' => (int) $response['meta']['total_processed'],
+                'meta' => $response['meta'],
+            ]);
+        }
+
+        return response()->json($response);
     }
 
     private function readCsvFile(UploadedFile $file): array
@@ -588,13 +1060,115 @@ class AttendanceController extends Controller
             return $rows;
         }
 
-        while (($data = fgetcsv($handle)) !== false) {
+        $firstLine = fgets($handle);
+        if ($firstLine === false) {
+            fclose($handle);
+
+            return $rows;
+        }
+
+        $firstLine = (string) preg_replace('/^\xEF\xBB\xBF/', '', $firstLine);
+        $candidateDelimiters = [',', ';', "\t", '|'];
+        $delimiter = ',';
+        $highestCount = -1;
+        foreach ($candidateDelimiters as $candidateDelimiter) {
+            $count = substr_count($firstLine, $candidateDelimiter);
+            if ($count > $highestCount) {
+                $highestCount = $count;
+                $delimiter = $candidateDelimiter;
+            }
+        }
+
+        rewind($handle);
+
+        while (($data = fgetcsv($handle, 0, $delimiter)) !== false) {
             $rows[] = $data;
         }
 
         fclose($handle);
 
         return $rows;
+    }
+
+    private function normalizeCsvHeader(string $header): string
+    {
+        $normalized = $this->normalizeCsvValue((string) preg_replace('/^\xEF\xBB\xBF/', '', $header));
+        $normalized = Str::lower($normalized);
+        $normalized = preg_replace('/[^a-z0-9]+/', '_', $normalized) ?? '';
+
+        return trim($normalized, '_');
+    }
+
+    private function normalizeCsvValue(string $value): string
+    {
+        $normalized = trim((string) preg_replace('/^\xEF\xBB\xBF/', '', $value));
+        if ($normalized === '') {
+            return '';
+        }
+
+        if (function_exists('mb_detect_encoding') && function_exists('mb_convert_encoding')) {
+            $encoding = mb_detect_encoding($normalized, ['UTF-8', 'Windows-1252', 'ISO-8859-1', 'ASCII'], true);
+            if (is_string($encoding) && strtoupper($encoding) !== 'UTF-8') {
+                $converted = mb_convert_encoding($normalized, 'UTF-8', $encoding);
+                if (is_string($converted)) {
+                    $normalized = $converted;
+                }
+            } elseif (!mb_check_encoding($normalized, 'UTF-8')) {
+                $converted = mb_convert_encoding($normalized, 'UTF-8', 'Windows-1252');
+                if (is_string($converted)) {
+                    $normalized = $converted;
+                }
+            }
+        }
+
+        if (function_exists('iconv')) {
+            $iconvNormalized = iconv('UTF-8', 'UTF-8//IGNORE', $normalized);
+            if (is_string($iconvNormalized)) {
+                $normalized = $iconvNormalized;
+            }
+        }
+
+        return trim($normalized);
+    }
+
+    private function attendanceTaskProgressCacheKey(string $taskId): string
+    {
+        return 'attendance:task_progress:'.$taskId;
+    }
+
+    /**
+     * @param array{
+     *   action?: string,
+     *   status?: string,
+     *   percent?: int,
+     *   message?: string,
+     *   processed?: int,
+     *   total?: int,
+     *   meta?: array<string, mixed>
+     * } $payload
+     */
+    private function setAttendanceTaskProgress(string $taskId, array $payload): void
+    {
+        $normalizedTaskId = trim($taskId);
+        if ($normalizedTaskId === '') {
+            return;
+        }
+
+        Cache::put(
+            $this->attendanceTaskProgressCacheKey($normalizedTaskId),
+            [
+                'task_id' => $normalizedTaskId,
+                'action' => (string) ($payload['action'] ?? 'import'),
+                'status' => (string) ($payload['status'] ?? 'processing'),
+                'percent' => max(0, min(100, (int) ($payload['percent'] ?? 0))),
+                'message' => (string) ($payload['message'] ?? ''),
+                'processed' => max(0, (int) ($payload['processed'] ?? 0)),
+                'total' => max(0, (int) ($payload['total'] ?? 0)),
+                'meta' => is_array($payload['meta'] ?? null) ? $payload['meta'] : null,
+                'updated_at' => now()->toIso8601String(),
+            ],
+            now()->addMinutes(30)
+        );
     }
 
     /**

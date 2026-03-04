@@ -95,9 +95,7 @@ export function VoterImportProvider({ children }: { children: React.ReactNode })
                 ? "error"
                 : snapshot.status === "completed"
                   ? "success"
-                  : snapshot.status === "importing"
-                    ? "processing"
-                    : "uploading";
+                  : "processing";
 
             return {
               ...current,
@@ -128,7 +126,7 @@ export function VoterImportProvider({ children }: { children: React.ReactNode })
 
         return {
           ...current,
-          progress: percent >= 100 ? current.progress : percent,
+          progress: percent,
           status: percent >= 100 ? "processing" : "uploading",
           message: percent >= 100 ? "Upload complete. Waiting for server processing..." : current.message,
         };

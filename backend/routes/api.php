@@ -41,6 +41,7 @@ Route::middleware(['auth:sanctum', 'active'])->group(function () {
         Route::delete('/attendances', [AttendanceController::class, 'destroyMany']);
         Route::delete('/attendances/{user}', [AttendanceController::class, 'destroy']);
         Route::post('/attendances/import', [AttendanceController::class, 'import']);
+        Route::get('/attendances/progress/{taskId}', [AttendanceController::class, 'taskProgress']);
         Route::get('/voters', [UserController::class, 'voters']);
         Route::post('/voters', [UserController::class, 'storeVoter']);
         Route::patch('/voters/{user}', [UserController::class, 'updateVoter']);

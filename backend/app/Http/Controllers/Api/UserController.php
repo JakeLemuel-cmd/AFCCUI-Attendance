@@ -318,6 +318,8 @@ class UserController extends Controller
         }
 
         @ini_set('max_execution_time', '0');
+        @ini_set('upload_max_filesize', '0');
+        @ini_set('post_max_size', '0');
 
         $request->validate([
             'import_id' => ['required', 'string', 'max:120'],
@@ -571,8 +573,47 @@ class UserController extends Controller
         $created = 0;
         $updated = 0;
         $processed = 0;
-        $lastReportedPercent = -1;
         $defaultPasswordHash = Hash::make('Password@123');
+        $lastReportedPercent = -1;
+        $dbChunkSize = 500;
+        $usedVoterIds = array_fill_keys(
+            User::query()
+                ->whereNotNull('voter_id')
+                ->where('voter_id', '!=', '')
+                ->pluck('voter_id')
+                ->map(fn ($value): string => (string) $value)
+                ->all(),
+            true
+        );
+        $buildBaseVoterId = static function (string $name): string {
+            $firstName = trim((string) Str::of($name)->before(' '));
+            $base = (string) Str::of($firstName)->replaceMatches('/[^A-Za-z0-9]/', '')->value();
+            if ($base === '') {
+                $base = 'voter';
+            }
+
+            return ucfirst(strtolower($base));
+        };
+        $buildUniqueVoterId = static function (string $name, array &$seenVoterIds) use ($buildBaseVoterId): string {
+            $base = $buildBaseVoterId($name);
+            $candidate = $base;
+            $counter = 1;
+            while (isset($seenVoterIds[$candidate])) {
+                $candidate = $base.$counter;
+                $counter++;
+            }
+            $seenVoterIds[$candidate] = true;
+
+            return $candidate;
+        };
+        $buildRandomVoterId = static function (array &$seenVoterIds): string {
+            do {
+                $candidate = 'voter-'.Str::lower((string) Str::ulid());
+            } while (isset($seenVoterIds[$candidate]));
+            $seenVoterIds[$candidate] = true;
+
+            return $candidate;
+        };
 
         $this->setVoterImportProgress($importId, [
             'status' => 'importing',
@@ -594,11 +635,19 @@ class UserController extends Controller
                 $defaultPasswordHash,
                 $totalPayloads,
                 $importId,
+                $dbChunkSize,
+                &$usedVoterIds,
+                $buildUniqueVoterId,
+                $buildRandomVoterId,
                 &$created,
                 &$updated,
                 &$processed,
                 &$lastReportedPercent
             ): void {
+                $timestamp = now();
+                $updateRowsById = [];
+                $createRows = [];
+
                 foreach ($payloads as $payloadItem) {
                     $payload = $payloadItem['data'];
                     $identityKey = $this->voterIdentityKey((string) $payload['name'], $payload['branch']);
@@ -606,67 +655,108 @@ class UserController extends Controller
                         ? $existingUsersByEmail->get($payload['email'])
                         : $existingUsersByIdentity->get($identityKey);
 
-                    $attributes = [
-                        'name' => $payload['name'],
-                        'branch' => $payload['branch'],
-                        'role' => 'voter',
-                        'is_active' => (bool) $payload['is_active'],
-                    ];
-
                     if ($existingUser) {
-                        $existingUser->fill($attributes);
-                        $existingUser->save();
-                        $user = $existingUser;
-                        $updated++;
-                    } else {
-                        $user = User::create([
-                            ...$attributes,
-                            'email' => $payload['email'],
-                            'password' => $defaultPasswordHash,
-                        ]);
-
-                        if ($payload['email'] !== null) {
-                            $existingUsersByEmail->put($payload['email'], $user);
-                        } else {
-                            $existingUsersByIdentity->put($identityKey, $user);
+                        $userId = (int) $existingUser->id;
+                        if (! isset($updateRowsById[$userId])) {
+                            $updated++;
                         }
 
+                        $currentVoterId = trim((string) ($existingUser->voter_id ?? ''));
+                        $nextVoterId = $currentVoterId !== ''
+                            ? $currentVoterId
+                            : $buildUniqueVoterId((string) $payload['name'], $usedVoterIds);
+                        if ($currentVoterId !== '') {
+                            $usedVoterIds[$currentVoterId] = true;
+                        }
+
+                        $currentVoterKey = trim((string) ($existingUser->voter_key ?? ''));
+                        $nextVoterKey = $currentVoterKey !== ''
+                            ? $currentVoterKey
+                            : $this->generateVoterKeyFromName((string) $payload['name']);
+
+                        $updateRowsById[$userId] = [
+                            'id' => $userId,
+                            'name' => (string) $payload['name'],
+                            'branch' => $payload['branch'],
+                            'role' => UserRole::VOTER->value,
+                            'is_active' => (bool) $payload['is_active'],
+                            'voter_id' => $nextVoterId,
+                            'voter_key' => $nextVoterKey,
+                            'updated_at' => $timestamp,
+                        ];
+                    } else {
+                        $createRows[] = [
+                            'name' => (string) $payload['name'],
+                            'branch' => $payload['branch'],
+                            'email' => $payload['email'],
+                            'password' => $defaultPasswordHash,
+                            'role' => UserRole::VOTER->value,
+                            'is_active' => (bool) $payload['is_active'],
+                            'attendance_status' => 'absent',
+                            'already_voted' => false,
+                            'voter_id' => $buildRandomVoterId($usedVoterIds),
+                            'voter_key' => $this->generateVoterKeyFromName((string) $payload['name']),
+                            'created_at' => $timestamp,
+                            'updated_at' => $timestamp,
+                        ];
                         $created++;
                     }
+                }
 
-                    $shouldSave = false;
+                if ($updateRowsById !== []) {
+                    foreach (array_chunk(array_values($updateRowsById), $dbChunkSize) as $chunkRows) {
+                        User::query()->upsert(
+                            $chunkRows,
+                            ['id'],
+                            ['name', 'branch', 'role', 'is_active', 'voter_id', 'voter_key', 'updated_at']
+                        );
 
-                    if (! $user->voter_id) {
-                        $user->voter_id = $this->generateUniqueVoterId($user->name, $user->id);
-                        $shouldSave = true;
+                        $processed += count($chunkRows);
+                        $percent = $totalPayloads > 0
+                            ? (int) floor((min($processed, $totalPayloads) / $totalPayloads) * 100)
+                            : 100;
+
+                        if ($percent !== $lastReportedPercent) {
+                            $lastReportedPercent = $percent;
+                            $this->setVoterImportProgress($importId, [
+                                'status' => 'importing',
+                                'percent' => $percent,
+                                'processed' => min($processed, $totalPayloads),
+                                'total' => $totalPayloads,
+                                'created' => $created,
+                                'updated' => $updated,
+                                'message' => 'Importing voters...',
+                            ]);
+                        }
                     }
+                }
 
-                    if (! $user->voter_key) {
-                        $user->voter_key = $this->generateVoterKeyFromName($user->name);
-                        $shouldSave = true;
+                if ($createRows !== []) {
+                    foreach (array_chunk($createRows, $dbChunkSize) as $chunkRows) {
+                        User::query()->insert($chunkRows);
+
+                        $processed += count($chunkRows);
+                        $percent = $totalPayloads > 0
+                            ? (int) floor((min($processed, $totalPayloads) / $totalPayloads) * 100)
+                            : 100;
+
+                        if ($percent !== $lastReportedPercent || $processed >= $totalPayloads) {
+                            $lastReportedPercent = $percent;
+                            $this->setVoterImportProgress($importId, [
+                                'status' => 'importing',
+                                'percent' => $percent,
+                                'processed' => min($processed, $totalPayloads),
+                                'total' => $totalPayloads,
+                                'created' => $created,
+                                'updated' => $updated,
+                                'message' => 'Importing voters...',
+                            ]);
+                        }
                     }
+                }
 
-                    if ($shouldSave) {
-                        $user->save();
-                    }
-
-                    $processed++;
-                    $percent = $totalPayloads > 0
-                        ? (int) floor(($processed / $totalPayloads) * 100)
-                        : 100;
-
-                    if ($percent !== $lastReportedPercent || $processed === $totalPayloads) {
-                        $lastReportedPercent = $percent;
-                        $this->setVoterImportProgress($importId, [
-                            'status' => 'importing',
-                            'percent' => $percent,
-                            'processed' => $processed,
-                            'total' => $totalPayloads,
-                            'created' => $created,
-                            'updated' => $updated,
-                            'message' => 'Importing voters...',
-                        ]);
-                    }
+                if ($processed < $totalPayloads) {
+                    $processed = $totalPayloads;
                 }
             });
         } catch (\Throwable $exception) {

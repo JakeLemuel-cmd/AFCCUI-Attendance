@@ -59,7 +59,15 @@ export function extractErrorMessage(error: unknown): string {
       | undefined;
 
     if (!error.response) {
-      return `Cannot connect to the API server at ${API_BASE_URL}. Start the Laravel backend and try again.`;
+      const errorCode = String(error.code ?? "").toUpperCase();
+      const rawMessage = String(error.message ?? "").toLowerCase();
+      const isTimeout = errorCode.includes("TIMEOUT") || rawMessage.includes("timeout") || rawMessage.includes("timed out");
+
+      if (isTimeout) {
+        return `The API request to ${API_BASE_URL} timed out. The backend may still be processing the task.`;
+      }
+
+      return `No response from the API at ${API_BASE_URL}. Check backend URL/origin settings and CORS, then retry.`;
     }
 
     if (Array.isArray(data?.errors) && data.errors.length > 0) {

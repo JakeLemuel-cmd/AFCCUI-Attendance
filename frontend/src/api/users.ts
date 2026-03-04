@@ -190,12 +190,13 @@ export async function importVoters(file: File, importId: string, onProgress?: (p
         return;
       }
 
-      if (!event.total || event.total <= 0) {
-        onProgress(0);
+      const total = typeof event.total === "number" && event.total > 0 ? event.total : file.size;
+      if (total <= 0) {
         return;
       }
 
-      const percent = Math.min(100, Math.max(0, Math.round((event.loaded / event.total) * 100)));
+      const loaded = Math.min(Math.max(event.loaded ?? 0, 0), total);
+      const percent = Math.min(100, Math.max(0, Math.round((loaded / total) * 1000) / 10));
       onProgress(percent);
     },
   });

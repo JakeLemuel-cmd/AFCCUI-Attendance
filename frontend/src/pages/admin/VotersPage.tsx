@@ -308,21 +308,59 @@ export function VotersPage() {
   };
 
   const handleImportVoters = async (event: ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0];
+    const files = Array.from(event.target.files ?? []);
     event.target.value = "";
 
-    if (!file) {
+    if (files.length === 0) {
       return;
     }
 
     try {
       setError(null);
       setSuccess(null);
-      const response = await startImport(file);
-      await loadVoters();
+      let importedFileCount = 0;
+      let totalCreated = 0;
+      let totalUpdated = 0;
+      let totalProcessed = 0;
+      let totalSkipped = 0;
+      let firstFailedFileError: string | null = null;
+
+      for (const file of files) {
+        try {
+          const response = await startImport(file);
+          importedFileCount += 1;
+          totalCreated += response.meta.created;
+          totalUpdated += response.meta.updated;
+          totalProcessed += response.meta.total_processed;
+          totalSkipped += response.meta.skipped ?? 0;
+        } catch (importError) {
+          if (!firstFailedFileError) {
+            firstFailedFileError = `${file.name}: ${extractErrorMessage(importError)}`;
+          }
+        }
+      }
+
+      if (importedFileCount > 0) {
+        await loadVoters();
+      }
+
+      if (importedFileCount === 0) {
+        setError(firstFailedFileError ?? "No files were imported.");
+        return;
+      }
+
+      const summaryPrefix =
+        files.length > 1
+          ? `Imported ${importedFileCount}/${files.length} file(s).`
+          : "Import complete.";
       setSuccess(
-        `Import complete. ${response.meta.created} created, ${response.meta.updated} updated, ${response.meta.total_processed} processed.`
+        `${summaryPrefix} ${totalCreated} created, ${totalUpdated} updated, ${totalProcessed} processed, ${totalSkipped} skipped.`
       );
+
+      if (firstFailedFileError) {
+        setError(`Some files failed. First failed file: ${firstFailedFileError}`);
+      }
+
       setMenuOpen(false);
     } catch (importError) {
       if (importError instanceof Error && importError.message.trim() !== "") {
@@ -610,6 +648,7 @@ export function VotersPage() {
             ref={fileInputRef}
             type="file"
             accept=".csv,text/csv"
+            multiple
             className="hidden"
             onChange={(event) => {
               void handleImportVoters(event);

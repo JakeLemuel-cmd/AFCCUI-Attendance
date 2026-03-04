@@ -1,7 +1,7 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type ChangeEvent } from "react";
 import type { IScannerControls } from "@zxing/browser";
 import { CalendarCheck2, Camera, ChevronDown, Download, Link as LinkIcon, Plus, Trash2, Upload, UserCheck2, UserX, Users } from "lucide-react";
-import { deleteAttendancesForElection, exportPresentAttendancesCsv, getAttendances, upsertAttendance } from "@/api/attendance";
+import { deleteAttendancesForElection, exportPresentAttendancesCsv, getAttendances, importAttendances, upsertAttendance } from "@/api/attendance";
 import { extractErrorMessage } from "@/api/client";
 import { getElections } from "@/api/elections";
 import { getVoters } from "@/api/users";
@@ -105,6 +105,7 @@ export function AttendanceDashboard({ view = "attendance" }: AttendanceDashboard
   const [activeElectionStatus, setActiveElectionStatus] = useState<ElectionStatus | null>(null);
   const [notice, setNotice] = useState<{ tone: "error" | "success" | "warning"; message: string } | null>(null);
   const [exporting, setExporting] = useState(false);
+  const [importingAttendance, setImportingAttendance] = useState(false);
   const [addAttendanceOpen, setAddAttendanceOpen] = useState(false);
   const [selectedVoter, setSelectedVoter] = useState<{ voterId: string; label: string } | null>(null);
   const [voterDropdownOpen, setVoterDropdownOpen] = useState(false);
@@ -130,6 +131,7 @@ export function AttendanceDashboard({ view = "attendance" }: AttendanceDashboard
   const voterDropdownRef = useRef<HTMLDivElement | null>(null);
   const voterSearchInputRef = useRef<HTMLInputElement | null>(null);
   const qrUploadInputRef = useRef<HTMLInputElement | null>(null);
+  const attendanceImportInputRef = useRef<HTMLInputElement | null>(null);
   const mediaStreamRef = useRef<MediaStream | null>(null);
   const zxingControlsRef = useRef<IScannerControls | null>(null);
   const scanBusyRef = useRef(false);
@@ -140,6 +142,7 @@ export function AttendanceDashboard({ view = "attendance" }: AttendanceDashboard
       setLoading(true);
       const response = await getAttendances({
         election_id: electionId,
+        status: view === "attendance" ? "present" : undefined,
         page,
         per_page: ATTENDANCE_PER_PAGE,
       });
@@ -155,7 +158,7 @@ export function AttendanceDashboard({ view = "attendance" }: AttendanceDashboard
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [view]);
 
   const buildAttendanceLink = useCallback((electionId: number) => {
     const origin = window.location.origin;
@@ -267,6 +270,49 @@ export function AttendanceDashboard({ view = "attendance" }: AttendanceDashboard
     }
   }, [activeElectionId]);
 
+  const handleImportAttendance = useCallback(
+    async (event: ChangeEvent<HTMLInputElement>) => {
+      const file = event.target.files?.[0];
+      event.target.value = "";
+
+      if (!file) {
+        return;
+      }
+
+      if (!activeElectionId) {
+        setNotice({
+          tone: "warning",
+          message: "No election selected for attendance import.",
+        });
+        return;
+      }
+
+      try {
+        setImportingAttendance(true);
+        const response = await importAttendances(file, activeElectionId);
+        await loadAttendances(activeElectionId, recordsPage);
+
+        const skipped = response.meta.skipped ?? 0;
+        const firstError = response.errors?.[0]
+          ? ` First issue: line ${response.errors[0].line} - ${response.errors[0].message}`
+          : "";
+
+        setNotice({
+          tone: skipped > 0 ? "warning" : "success",
+          message: `${response.message} Processed: ${response.meta.total_processed}. Updated: ${response.meta.updated}. Skipped: ${skipped}.${firstError}`,
+        });
+      } catch (importError) {
+        setNotice({
+          tone: "error",
+          message: extractErrorMessage(importError),
+        });
+      } finally {
+        setImportingAttendance(false);
+      }
+    },
+    [activeElectionId, loadAttendances, recordsPage]
+  );
+
   const loadVoterOptions = useCallback(
     async (searchTerm: string) => {
       try {
@@ -342,7 +388,9 @@ export function AttendanceDashboard({ view = "attendance" }: AttendanceDashboard
       return;
     }
 
-    const confirmed = window.confirm("Delete all attendance records for the selected election?");
+    const confirmed = window.confirm(
+      "Delete all attendance records for the selected election and remove voter accounts except protected accounts?"
+    );
     if (!confirmed) {
       return;
     }
@@ -351,9 +399,10 @@ export function AttendanceDashboard({ view = "attendance" }: AttendanceDashboard
       setDeletingAttendance(true);
       setDeleteAttendanceError(null);
       const response = await deleteAttendancesForElection(activeElectionId, "DELETE ALL");
+      const deletedUsers = response.meta.deleted_users ?? 0;
       setNotice({
         tone: "success",
-        message: `${response.message} Deleted: ${response.meta.deleted}.`,
+        message: `${response.message} Attendance deleted: ${response.meta.deleted}. Users deleted: ${deletedUsers}.`,
       });
       setDeleteAttendanceOpen(false);
       setDeleteConfirmationInput("");
@@ -649,6 +698,7 @@ export function AttendanceDashboard({ view = "attendance" }: AttendanceDashboard
       value: String(voter.voter_id),
       label: `${voter.name} (${formatUserRole(voter.role)})${voter.branch ? ` - ${voter.branch}` : ""}`,
     }));
+  const visibleRecords = view === "attendance" ? records.filter((row) => row.status === "present") : records;
 
   return (
     <div className="space-y-4">
@@ -723,6 +773,15 @@ export function AttendanceDashboard({ view = "attendance" }: AttendanceDashboard
               </div>
             ) : null}
           </div>
+          <input
+            ref={attendanceImportInputRef}
+            type="file"
+            accept=".csv,text/csv,.txt,text/plain"
+            className="hidden"
+            onChange={(event) => {
+              void handleImportAttendance(event);
+            }}
+          />
           {view === "records" ? (
             <div className="relative" ref={actionsMenuRef}>
               <Button
@@ -755,6 +814,18 @@ export function AttendanceDashboard({ view = "attendance" }: AttendanceDashboard
                   >
                     <Plus className="h-4 w-4 text-muted-foreground" />
                     Add Attendance
+                  </button>
+                  <button
+                    type="button"
+                    className="inline-flex w-full items-center gap-2 rounded px-3 py-2 text-left text-sm hover:bg-muted disabled:cursor-not-allowed disabled:opacity-60"
+                    disabled={!activeElectionId || importingAttendance}
+                    onClick={() => {
+                      setActionsMenuOpen(false);
+                      attendanceImportInputRef.current?.click();
+                    }}
+                  >
+                    <Upload className="h-4 w-4 text-muted-foreground" />
+                    {importingAttendance ? "Importing..." : "Import Attendance"}
                   </button>
                   <button
                     type="button"
@@ -813,22 +884,16 @@ export function AttendanceDashboard({ view = "attendance" }: AttendanceDashboard
           <Table>
             <TableHeader>
               <TableRow>
-                <TableHead>Voter ID</TableHead>
                 <TableHead>Name</TableHead>
                 <TableHead>Branch</TableHead>
                 <TableHead>Check-in</TableHead>
                 <TableHead>Attendance Status</TableHead>
-                <TableHead>Already Voted</TableHead>
-                <TableHead>Source</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
-              {loading && records.length === 0
+              {loading && visibleRecords.length === 0
                 ? Array.from({ length: 5 }).map((_, index) => (
                     <TableRow key={`attendance-skeleton-${index}`}>
-                      <TableCell>
-                        <div className="h-3 w-24 animate-pulse rounded bg-secondary" />
-                      </TableCell>
                       <TableCell>
                         <div className="h-3 w-40 animate-pulse rounded bg-secondary" />
                       </TableCell>
@@ -841,17 +906,10 @@ export function AttendanceDashboard({ view = "attendance" }: AttendanceDashboard
                       <TableCell>
                         <div className="h-6 w-20 animate-pulse rounded-full bg-secondary" />
                       </TableCell>
-                      <TableCell>
-                        <div className="h-3 w-10 animate-pulse rounded bg-secondary" />
-                      </TableCell>
-                      <TableCell>
-                        <div className="h-3 w-16 animate-pulse rounded bg-secondary" />
-                      </TableCell>
                     </TableRow>
                   ))
-                : records.map((row) => (
+                : visibleRecords.map((row) => (
                 <TableRow key={row.id}>
-                  <TableCell className="font-medium">{row.user?.voter_id ?? "-"}</TableCell>
                   <TableCell>{row.user?.name ?? "-"}</TableCell>
                   <TableCell>{row.user?.branch ?? "-"}</TableCell>
                   <TableCell>{row.checked_in_at ? new Date(row.checked_in_at).toLocaleString() : "-"}</TableCell>
@@ -862,19 +920,11 @@ export function AttendanceDashboard({ view = "attendance" }: AttendanceDashboard
                       <Badge variant="secondary">Absent</Badge>
                     )}
                   </TableCell>
-                  <TableCell>
-                    {row.user?.already_voted ? (
-                      <span className="font-bold text-green-600">YES</span>
-                    ) : (
-                      <span className="text-muted-foreground">NO</span>
-                    )}
-                  </TableCell>
-                  <TableCell className="capitalize">{row.source}</TableCell>
                 </TableRow>
                   ))}
-              {!loading && records.length === 0 ? (
+              {!loading && visibleRecords.length === 0 ? (
                 <TableRow>
-                  <TableCell colSpan={7} className="text-center text-muted-foreground">
+                  <TableCell colSpan={4} className="text-center text-muted-foreground">
                     No attendance records found.
                   </TableCell>
                 </TableRow>
@@ -1043,7 +1093,7 @@ export function AttendanceDashboard({ view = "attendance" }: AttendanceDashboard
               Delete Attendance
             </AlertDialogTitle>
             <AlertDialogDescription>
-              This will delete all attendance records for the selected election. Type <span className="font-semibold">DELETE ALL</span> to confirm.
+              This will delete attendance records for the selected election and remove voter users except protected accounts. Type <span className="font-semibold">DELETE ALL</span> to confirm.
             </AlertDialogDescription>
           </AlertDialogHeader>
 

@@ -41,6 +41,8 @@ interface DeleteAttendancesForElectionResponse {
   meta: {
     deleted: number;
     affected_voters: number;
+    deleted_users?: number;
+    protected_accounts?: string[];
   };
 }
 

@@ -16,7 +16,6 @@ use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\DB;
-use Illuminate\Support\Facades\Validator;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Str;
 
@@ -53,6 +52,7 @@ class AttendanceController extends Controller
             ->where('role', UserRole::VOTER->value)
             ->orderBy('name')
             ->orderBy('id');
+        $this->applyProtectedVoterExclusion($baseQuery);
 
         $search = isset($data['search']) ? trim((string) $data['search']) : '';
         if ($search !== '') {
@@ -70,16 +70,9 @@ class AttendanceController extends Controller
 
         $totalCount = (clone $baseQuery)->count();
         if ($electionId !== null) {
-            if ($search === '') {
-                $presentCount = Attendance::query()
-                    ->where('election_id', $electionId)
-                    ->where('status', AttendanceStatus::PRESENT->value)
-                    ->count();
-            } else {
-                $presentQuery = clone $baseQuery;
-                $this->applyAttendanceStatusFilter($presentQuery, $electionId, AttendanceStatus::PRESENT->value);
-                $presentCount = $presentQuery->count();
-            }
+            $presentQuery = clone $baseQuery;
+            $this->applyAttendanceStatusFilter($presentQuery, $electionId, AttendanceStatus::PRESENT->value);
+            $presentCount = $presentQuery->count();
             $absentCount = max(0, $totalCount - $presentCount);
         } else {
             $presentCount = (clone $baseQuery)
@@ -140,14 +133,21 @@ class AttendanceController extends Controller
             'checked_in_at' => ['nullable', 'date'],
         ]);
 
+        $voterId = trim((string) $data['voter_id']);
         $voter = User::query()
             ->where('role', UserRole::VOTER->value)
-            ->where('voter_id', trim((string) $data['voter_id']))
+            ->where('voter_id', $voterId)
             ->first();
 
         if (! $voter) {
             return response()->json([
                 'message' => 'No user registered',
+            ], 422);
+        }
+
+        if ($this->isProtectedAttendanceVoter($voter)) {
+            return response()->json([
+                'message' => 'This voter is excluded from attendance.',
             ], 422);
         }
 
@@ -242,6 +242,12 @@ class AttendanceController extends Controller
             ], 422);
         }
 
+        if ($this->isProtectedAttendanceVoter($user)) {
+            return response()->json([
+                'message' => 'This voter is excluded from attendance.',
+            ], 422);
+        }
+
         $electionId = (int) $data['election_id'];
         $electionTitle = Election::query()
             ->whereKey($electionId)
@@ -322,8 +328,26 @@ class AttendanceController extends Controller
         }
 
         $electionId = (int) $data['election_id'];
+        $protectedEmails = $this->bulkDeleteProtectedEmails();
+        $protectedVoterIds = User::query()
+            ->where('role', UserRole::VOTER->value)
+            ->whereNotNull('email')
+            ->where(function (Builder $query) use ($protectedEmails): void {
+                foreach ($protectedEmails as $email) {
+                    $query->orWhereRaw('LOWER(email) = ?', [Str::lower($email)]);
+                }
+            })
+            ->pluck('id')
+            ->map(fn ($userId): int => (int) $userId)
+            ->all();
 
-        [$deletedCount, $affectedUserCount] = DB::transaction(function () use ($electionId): array {
+        if (count($protectedVoterIds) === 0) {
+            return response()->json([
+                'message' => 'No protected voter account was found. Bulk delete was cancelled.',
+            ], 422);
+        }
+
+        [$deletedCount, $deletedUserCount, $affectedUserCount] = DB::transaction(function () use ($electionId, $protectedVoterIds): array {
             $affectedUserIds = Attendance::query()
                 ->where('election_id', $electionId)
                 ->select('user_id')
@@ -332,46 +356,55 @@ class AttendanceController extends Controller
                 ->map(fn ($userId): int => (int) $userId)
                 ->all();
 
-            if ($affectedUserIds === []) {
-                return [0, 0];
-            }
-
             $deletedCount = Attendance::query()
                 ->where('election_id', $electionId)
                 ->delete();
 
-            User::query()
-                ->whereIn('id', $affectedUserIds)
-                ->update([
-                    'attendance_status' => AttendanceStatus::ABSENT->value,
-                ]);
-
-            $remainingPresentUserIds = Attendance::query()
-                ->whereIn('user_id', $affectedUserIds)
-                ->where('status', AttendanceStatus::PRESENT->value)
-                ->select('user_id')
-                ->distinct()
-                ->pluck('user_id')
-                ->map(fn ($userId): int => (int) $userId)
-                ->all();
-
-            if ($remainingPresentUserIds !== []) {
+            if ($affectedUserIds !== []) {
                 User::query()
-                    ->whereIn('id', $remainingPresentUserIds)
+                    ->whereIn('id', $affectedUserIds)
                     ->update([
-                        'attendance_status' => AttendanceStatus::PRESENT->value,
+                        'attendance_status' => AttendanceStatus::ABSENT->value,
                     ]);
+
+                $remainingPresentUserIds = Attendance::query()
+                    ->whereIn('user_id', $affectedUserIds)
+                    ->where('status', AttendanceStatus::PRESENT->value)
+                    ->select('user_id')
+                    ->distinct()
+                    ->pluck('user_id')
+                    ->map(fn ($userId): int => (int) $userId)
+                    ->all();
+
+                if ($remainingPresentUserIds !== []) {
+                    User::query()
+                        ->whereIn('id', $remainingPresentUserIds)
+                        ->update([
+                            'attendance_status' => AttendanceStatus::PRESENT->value,
+                        ]);
+                }
             }
 
-            return [$deletedCount, count($affectedUserIds)];
+            $deleteUserQuery = User::query()
+                ->where('role', UserRole::VOTER->value)
+                ->whereNotIn('id', $protectedVoterIds);
+            $deletedUserCount = (int) (clone $deleteUserQuery)->count();
+
+            if ($deletedUserCount > 0) {
+                $deleteUserQuery->delete();
+            }
+
+            return [$deletedCount, $deletedUserCount, count($affectedUserIds)];
         });
 
-        if ($deletedCount === 0) {
+        if ($deletedCount === 0 && $deletedUserCount === 0) {
             return response()->json([
-                'message' => 'No attendance records found to delete for the selected election.',
+                'message' => 'No attendance records or voter accounts found to delete.',
                 'meta' => [
                     'deleted' => 0,
                     'affected_voters' => 0,
+                    'deleted_users' => 0,
+                    'protected_accounts' => $protectedEmails,
                 ],
             ], 200);
         }
@@ -379,14 +412,16 @@ class AttendanceController extends Controller
         AuditLogger::log(
             $request,
             'attendance.bulk_delete',
-            "Bulk attendance delete completed for election #{$electionId}. Deleted: {$deletedCount}, Affected voters: {$affectedUserCount}."
+            "Bulk attendance delete completed for election #{$electionId}. Attendance deleted: {$deletedCount}, Voters deleted: {$deletedUserCount}, Affected voters: {$affectedUserCount}."
         );
 
         return response()->json([
-            'message' => 'All attendance records for the selected election were deleted successfully.',
+            'message' => 'Attendance records were deleted and voter accounts were cleaned up. Protected accounts were kept.',
             'meta' => [
                 'deleted' => $deletedCount,
                 'affected_voters' => $affectedUserCount,
+                'deleted_users' => $deletedUserCount,
+                'protected_accounts' => $protectedEmails,
             ],
         ]);
     }
@@ -416,10 +451,9 @@ class AttendanceController extends Controller
             $rows[0]
         );
 
-        if (! in_array('voter_id', $headers, true)
-            || ! in_array('status', $headers, true)) {
+        if (! in_array('name', $headers, true)) {
             return response()->json([
-                'message' => 'CSV must contain VOTER ID and STATUS columns.',
+                'message' => 'CSV must contain a NAME column.',
             ], 422);
         }
 
@@ -439,52 +473,50 @@ class AttendanceController extends Controller
                 continue;
             }
 
-            $status = $this->parseAttendanceStatus($row['status'] ?? null);
-            if ($status === null) {
+            $name = trim((string) ($row['name'] ?? ''));
+            if ($name === '') {
                 $errors[] = [
                     'line' => $line,
-                    'message' => 'STATUS must be present or absent.',
+                    'message' => 'NAME is required.',
                 ];
 
                 continue;
             }
 
-            $normalized = [
-                'voter_id' => $row['voter_id'] ?? null,
-                'status' => $status,
-            ];
+            $normalizedName = preg_replace('/\s+/', ' ', $name);
+            $normalizedName = is_string($normalizedName) ? trim($normalizedName) : $name;
 
-            $validator = Validator::make($normalized, [
-                'voter_id' => ['required', 'string', 'max:100'],
-                'status' => ['required', 'in:present,absent'],
-            ]);
+            $matchedVotersQuery = User::query()
+                ->select(['id'])
+                ->where('role', UserRole::VOTER->value);
+            $this->applyProtectedVoterExclusion($matchedVotersQuery);
 
-            if ($validator->fails()) {
+            $matchedVoters = $matchedVotersQuery
+                ->whereRaw('LOWER(TRIM(name)) = ?', [Str::lower($normalizedName)])
+                ->limit(2)
+                ->get();
+
+            if ($matchedVoters->isEmpty()) {
                 $errors[] = [
                     'line' => $line,
-                    'message' => $validator->errors()->first(),
+                    'message' => 'Voter name was not found.',
                 ];
 
                 continue;
             }
 
-            $voter = User::query()
-                ->where('role', UserRole::VOTER->value)
-                ->where('voter_id', $normalized['voter_id'])
-                ->first();
-
-            if (! $voter) {
+            if ($matchedVoters->count() > 1) {
                 $errors[] = [
                     'line' => $line,
-                    'message' => 'Voter ID was not found.',
+                    'message' => 'Multiple voters matched NAME. Please use a unique voter name.',
                 ];
 
                 continue;
             }
 
             $payloads[] = [
-                'user_id' => $voter->id,
-                'status' => $normalized['status'],
+                'user_id' => (int) $matchedVoters->first()->id,
+                'status' => AttendanceStatus::PRESENT->value,
             ];
         }
 
@@ -563,6 +595,49 @@ class AttendanceController extends Controller
         fclose($handle);
 
         return $rows;
+    }
+
+    /**
+     * @return array<int, string>
+     */
+    private function bulkDeleteProtectedEmails(): array
+    {
+        return [
+            'superadmin@voting.local',
+            'electionadmin@voting.local',
+            'voter@voting.local',
+        ];
+    }
+
+    private function applyProtectedVoterExclusion(Builder $query): void
+    {
+        $protectedEmails = array_map(static fn (string $email): string => Str::lower($email), $this->bulkDeleteProtectedEmails());
+        if ($protectedEmails === []) {
+            return;
+        }
+
+        $placeholders = implode(',', array_fill(0, count($protectedEmails), '?'));
+        $query->where(function (Builder $builder) use ($protectedEmails, $placeholders): void {
+            $builder
+                ->whereNull('email')
+                ->orWhereRaw("LOWER(email) NOT IN ({$placeholders})", $protectedEmails);
+        });
+    }
+
+    private function isProtectedAttendanceVoter(User $voter): bool
+    {
+        if (! $voter->isVoter()) {
+            return false;
+        }
+
+        $email = is_string($voter->email) ? trim($voter->email) : '';
+        if ($email === '') {
+            return false;
+        }
+
+        $protectedEmails = array_map(static fn (string $item): string => Str::lower($item), $this->bulkDeleteProtectedEmails());
+
+        return in_array(Str::lower($email), $protectedEmails, true);
     }
 
     private function parseAttendanceStatus(?string $value): ?string

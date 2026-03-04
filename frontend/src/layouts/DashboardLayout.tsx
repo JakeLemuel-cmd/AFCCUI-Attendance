@@ -8,7 +8,6 @@ import {
   LogOut,
   Menu,
   Settings,
-  Users,
   Vote,
   X,
   type LucideIcon,
@@ -43,8 +42,6 @@ const NAV_ITEMS: NavItem[] = [
       { label: "Attendance Records", path: "/admin/attendance/records" },
     ],
   },
-  { label: "Voters", path: "/admin/voters", roles: ["super_admin", "election_admin"], icon: Users },
-  { label: "Ballot", path: "/admin/ballot", roles: ["super_admin", "election_admin"], icon: Vote },
   {
     label: "Settings",
     path: "/admin/settings",

@@ -747,6 +747,11 @@ class AttendanceController extends Controller
             $normalizedName = preg_replace('/\s+/', ' ', $name);
             $normalizedName = is_string($normalizedName) ? trim($normalizedName) : $name;
             $normalizedNameKey = $normalizeNameKey($normalizedName);
+            $rowStatus = $this->parseAttendanceStatus(
+                isset($row['attendance_status'])
+                    ? (string) $row['attendance_status']
+                    : (isset($row['status']) ? (string) $row['status'] : null)
+            ) ?? AttendanceStatus::ABSENT->value;
             $matchedVoterId = $normalizedNameKey !== '' ? ($matchedVotersByName[$normalizedNameKey] ?? null) : null;
 
             if ($matchedVoterId === null) {
@@ -762,6 +767,7 @@ class AttendanceController extends Controller
                 $deferredPayloads[] = [
                     'line' => $line,
                     'name_key' => $normalizedNameKey,
+                    'status' => $rowStatus,
                 ];
 
                 $updateLoopProgress();
@@ -770,7 +776,7 @@ class AttendanceController extends Controller
 
             $payloads[] = [
                 'user_id' => $matchedVoterId,
-                'status' => AttendanceStatus::PRESENT->value,
+                'status' => $rowStatus,
             ];
 
             $updateLoopProgress();
@@ -886,7 +892,7 @@ class AttendanceController extends Controller
 
                 $payloads[] = [
                     'user_id' => $matchedVoterId,
-                    'status' => AttendanceStatus::PRESENT->value,
+                    'status' => (string) ($deferredPayload['status'] ?? AttendanceStatus::ABSENT->value),
                 ];
             }
         }
@@ -945,11 +951,21 @@ class AttendanceController extends Controller
             ], 422);
         }
 
-        $uniqueUserIds = array_values(array_unique(array_map(
-            static fn (array $payload): int => (int) ($payload['user_id'] ?? 0),
-            $payloads
-        )));
-        $uniqueUserIds = array_values(array_filter($uniqueUserIds, static fn (int $userId): bool => $userId > 0));
+        $statusByUserId = [];
+        foreach ($payloads as $payload) {
+            $userId = (int) ($payload['user_id'] ?? 0);
+            if ($userId <= 0) {
+                continue;
+            }
+
+            $status = (string) ($payload['status'] ?? AttendanceStatus::ABSENT->value);
+            if (! in_array($status, [AttendanceStatus::PRESENT->value, AttendanceStatus::ABSENT->value], true)) {
+                $status = AttendanceStatus::ABSENT->value;
+            }
+
+            $statusByUserId[$userId] = $status;
+        }
+        $uniqueUserIds = array_keys($statusByUserId);
         $updated = count($uniqueUserIds);
         if ($taskId !== '') {
             $this->setAttendanceTaskProgress($taskId, [
@@ -964,7 +980,7 @@ class AttendanceController extends Controller
 
         $payloadTotal = count($payloads);
         $updateChunkSize = $importChunkSize;
-        DB::transaction(function () use ($payloads, $electionId, $uniqueUserIds, $taskId, $payloadTotal, $updateChunkSize): void {
+        DB::transaction(function () use ($payloads, $electionId, $statusByUserId, $taskId, $payloadTotal, $updateChunkSize): void {
             $timestamp = now();
 
             if ($electionId !== null && $payloads !== []) {
@@ -1008,12 +1024,22 @@ class AttendanceController extends Controller
                 }
             }
 
-            foreach (array_chunk($uniqueUserIds, $updateChunkSize) as $chunkUserIds) {
-                User::query()
-                    ->whereIn('id', $chunkUserIds)
-                    ->update([
-                        'attendance_status' => AttendanceStatus::PRESENT->value,
-                    ]);
+            $userIdsByStatus = [
+                AttendanceStatus::PRESENT->value => [],
+                AttendanceStatus::ABSENT->value => [],
+            ];
+            foreach ($statusByUserId as $userId => $status) {
+                $userIdsByStatus[$status][] = (int) $userId;
+            }
+
+            foreach ($userIdsByStatus as $status => $userIds) {
+                foreach (array_chunk($userIds, $updateChunkSize) as $chunkUserIds) {
+                    User::query()
+                        ->whereIn('id', $chunkUserIds)
+                        ->update([
+                            'attendance_status' => $status,
+                        ]);
+                }
             }
         });
 

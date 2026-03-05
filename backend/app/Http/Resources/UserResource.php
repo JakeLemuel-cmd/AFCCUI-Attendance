@@ -21,6 +21,7 @@ class UserResource extends JsonResource
             'email' => $this->email,
             'voter_id' => $this->voter_id,
             'voter_key' => $this->voter_key,
+            'attendance_id' => $this->attendance_id !== null ? (int) $this->attendance_id : null,
             'role' => $this->role,
             'is_active' => (bool) $this->is_active,
             'attendance_status' => in_array($this->attendance_status, ['present', 'absent'], true)

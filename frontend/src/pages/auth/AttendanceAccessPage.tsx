@@ -16,18 +16,14 @@ import {
 } from "@/components/ui/alert-dialog";
 import { cn } from "@/lib/utils";
 
-function extractVoterCredentials(payload: Record<string, unknown>): { voter_id: string; voter_key: string } | null {
-  const voterId = String(payload.voter_id ?? payload.voterId ?? payload["voter-id"] ?? "").trim();
-  const voterKey = String(payload.voter_key ?? payload.voterKey ?? payload["voter-key"] ?? "").trim();
-
-  if (voterId === "" || voterKey === "") {
+function extractAttendanceId(payload: Record<string, unknown>): number | null {
+  const candidate = payload.attendance_id ?? payload.attendanceId ?? payload["attendance-id"];
+  const parsed = Number(candidate);
+  if (!Number.isInteger(parsed) || parsed <= 0) {
     return null;
   }
 
-  return {
-    voter_id: voterId,
-    voter_key: voterKey,
-  };
+  return parsed;
 }
 
 function normalizeQrInput(rawValue: string): string {
@@ -48,17 +44,24 @@ function normalizeQrInput(rawValue: string): string {
   return normalized;
 }
 
-function parseVoterQrPayload(rawValue: string): { voter_id: string; voter_key: string } | null {
+type ParsedAttendanceQrPayload = { attendance_id: number };
+
+function parseAttendanceQrPayload(rawValue: string): ParsedAttendanceQrPayload | null {
   const raw = normalizeQrInput(rawValue);
   if (raw === "") {
     return null;
   }
 
-  const tryParseJson = (input: string): { voter_id: string; voter_key: string } | null => {
+  const tryParseJson = (input: string): ParsedAttendanceQrPayload | null => {
     try {
       const parsed = JSON.parse(input) as unknown;
       if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-        return extractVoterCredentials(parsed as Record<string, unknown>);
+        const asRecord = parsed as Record<string, unknown>;
+        const attendanceId = extractAttendanceId(asRecord);
+        if (attendanceId) {
+          return { attendance_id: attendanceId };
+        }
+
       }
     } catch {
       // Continue with alternate formats.
@@ -82,15 +85,11 @@ function parseVoterQrPayload(rawValue: string): { voter_id: string; voter_key: s
 
   try {
     const url = new URL(raw, window.location.origin);
-    const voterId = (url.searchParams.get("voter_id") ?? url.searchParams.get("voterId") ?? "").trim();
-    const voterKey = (url.searchParams.get("voter_key") ?? url.searchParams.get("voterKey") ?? "").trim();
-
-    if (voterId !== "" && voterKey !== "") {
-      return {
-        voter_id: voterId,
-        voter_key: voterKey,
-      };
+    const attendanceId = Number(url.searchParams.get("attendance_id") ?? url.searchParams.get("attendanceId") ?? "");
+    if (Number.isInteger(attendanceId) && attendanceId > 0) {
+      return { attendance_id: attendanceId };
     }
+
   } catch {
     // Continue parsing with query string/plain formats.
   }
@@ -99,44 +98,19 @@ function parseVoterQrPayload(rawValue: string): { voter_id: string; voter_key: s
   const queryString = queryStart >= 0 ? raw.slice(queryStart) : raw;
   const normalizedQuery = queryString.startsWith("?") ? queryString : `?${queryString}`;
   const params = new URLSearchParams(normalizedQuery);
-  const queryVoterId = (params.get("voter_id") ?? params.get("voterId") ?? "").trim();
-  const queryVoterKey = (params.get("voter_key") ?? params.get("voterKey") ?? "").trim();
-
-  if (queryVoterId !== "" && queryVoterKey !== "") {
-    return {
-      voter_id: queryVoterId,
-      voter_key: queryVoterKey,
-    };
+  const queryAttendanceId = Number(params.get("attendance_id") ?? params.get("attendanceId") ?? "");
+  if (Number.isInteger(queryAttendanceId) && queryAttendanceId > 0) {
+    return { attendance_id: queryAttendanceId };
   }
 
-  const keyedVoterId = raw.match(/voter[_\s-]?id\s*[:=]\s*["']?([^"'\s,;|]+)["']?/i)?.[1]?.trim() ?? "";
-  const keyedVoterKey = raw.match(/voter[_\s-]?key\s*[:=]\s*["']?([^"'\s,;|]+)["']?/i)?.[1]?.trim() ?? "";
-
-  if (keyedVoterId !== "" && keyedVoterKey !== "") {
-    return {
-      voter_id: keyedVoterId,
-      voter_key: keyedVoterKey,
-    };
+  const keyedAttendanceId = Number(raw.match(/attendance[_\s-]?id\s*[:=]\s*["']?(\d+)["']?/i)?.[1] ?? "");
+  if (Number.isInteger(keyedAttendanceId) && keyedAttendanceId > 0) {
+    return { attendance_id: keyedAttendanceId };
   }
 
-  const pairMatch = raw.match(/^([^|:,;\s]+)\s*[|:,;]\s*([^|:,;\s]+)$/);
-  if (pairMatch) {
-    return {
-      voter_id: pairMatch[1].trim(),
-      voter_key: pairMatch[2].trim(),
-    };
-  }
-
-  const lines = raw
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter(Boolean);
-
-  if (lines.length === 2) {
-    return {
-      voter_id: lines[0],
-      voter_key: lines[1],
-    };
+  const directAttendanceId = Number(raw);
+  if (Number.isInteger(directAttendanceId) && directAttendanceId > 0) {
+    return { attendance_id: directAttendanceId };
   }
 
   return null;
@@ -145,7 +119,7 @@ function parseVoterQrPayload(rawValue: string): { voter_id: string; voter_key: s
 interface ScanValidation {
   tone: "success" | "warning" | "error";
   message: string;
-  voterId: string | null;
+  reference: string | null;
   data?: AttendanceAccessCheckInResponse["data"];
   at: number;
 }
@@ -157,14 +131,14 @@ export function AttendanceAccessPage() {
   const [submitting, setSubmitting] = useState(false);
   const [scanOpen, setScanOpen] = useState(false);
   const [scanError, setScanError] = useState<string | null>(null);
-  const [scanHint, setScanHint] = useState("Allow camera access and point to voter QR code.");
+  const [scanHint, setScanHint] = useState("Allow camera access and point to attendance QR code.");
   const [scanValidation, setScanValidation] = useState<ScanValidation | null>(null);
 
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const mediaStreamRef = useRef<MediaStream | null>(null);
   const zxingControlsRef = useRef<IScannerControls | null>(null);
   const scanBusyRef = useRef(false);
-  const lastScannedRef = useRef<{ voterId: string; at: number } | null>(null);
+  const lastScannedRef = useRef<{ token: string; at: number } | null>(null);
 
   const stopScanner = useCallback(() => {
     if (zxingControlsRef.current) {
@@ -186,22 +160,12 @@ export function AttendanceAccessPage() {
     }
   }, []);
 
-  const markAttendance = useCallback(async (voterId: string, voterKey: string) => {
+  const markAttendance = useCallback(async (payload: ParsedAttendanceQrPayload) => {
     if (Number.isNaN(electionId)) {
       setScanValidation({
         tone: "error",
         message: "Attendance access link is invalid.",
-        voterId: null,
-        at: Date.now(),
-      });
-      return;
-    }
-
-    if (!voterId || !voterKey) {
-      setScanValidation({
-        tone: "error",
-        message: "Both voter ID and voter key are required.",
-        voterId: voterId || null,
+        reference: null,
         at: Date.now(),
       });
       return;
@@ -211,23 +175,25 @@ export function AttendanceAccessPage() {
       setSubmitting(true);
       const response = await attendanceAccessCheckIn({
         election_id: electionId,
-        voter_id: voterId,
-        voter_key: voterKey,
+        attendance_id: payload.attendance_id,
       });
+
+      const reference = `Attendance ID: ${payload.attendance_id}`;
 
       setScanValidation({
         tone: response.data.already_present ? "warning" : "success",
         message: response.message,
-        voterId,
+        reference,
         data: response.data,
         at: Date.now(),
       });
       setScanError(null);
     } catch (checkInError) {
+      const reference = `Attendance ID: ${payload.attendance_id}`;
       setScanValidation({
         tone: "error",
         message: extractErrorMessage(checkInError),
-        voterId: voterId || null,
+        reference,
         at: Date.now(),
       });
     } finally {
@@ -240,34 +206,35 @@ export function AttendanceAccessPage() {
       return;
     }
 
-    const parsed = parseVoterQrPayload(rawValue);
+    const parsed = parseAttendanceQrPayload(rawValue);
     if (!parsed) {
-      const message = "QR detected but voter credentials were not found in the code.";
+      const message = "QR detected but attendance data was not found in the code.";
       setScanError(message);
       setScanValidation({
         tone: "error",
         message,
-        voterId: null,
+        reference: null,
         at: Date.now(),
       });
       return;
     }
 
+    const scanToken = `attendance:${parsed.attendance_id}`;
     const now = Date.now();
-    if (lastScannedRef.current && lastScannedRef.current.voterId === parsed.voter_id && now - lastScannedRef.current.at < 2000) {
+    if (lastScannedRef.current && lastScannedRef.current.token === scanToken && now - lastScannedRef.current.at < 2000) {
       return;
     }
 
-    lastScannedRef.current = { voterId: parsed.voter_id, at: now };
+    lastScannedRef.current = { token: scanToken, at: now };
     scanBusyRef.current = true;
     setScanError(null);
     setScanHint("Marking attendance...");
 
     try {
-      await markAttendance(parsed.voter_id, parsed.voter_key);
+      await markAttendance(parsed);
     } finally {
       scanBusyRef.current = false;
-      setScanHint(scanOpen ? "Scanning QR code..." : "Allow camera access and point to voter QR code.");
+      setScanHint(scanOpen ? "Scanning QR code..." : "Allow camera access and point to attendance QR code.");
     }
   }, [markAttendance, scanOpen]);
 
@@ -292,7 +259,7 @@ export function AttendanceAccessPage() {
 
     const startScanner = async () => {
       setScanError(null);
-      setScanHint("Allow camera access and point to voter QR code.");
+      setScanHint("Allow camera access and point to attendance QR code.");
 
       if (!navigator.mediaDevices?.getUserMedia) {
         setScanError("Camera is not available in this browser.");
@@ -376,7 +343,7 @@ export function AttendanceAccessPage() {
     <div className="mx-auto w-full max-w-md animate-fade-up space-y-4">
       <div className="space-y-2">
         <h2 className="text-3xl font-extrabold tracking-tight text-foreground">Attendance Access</h2>
-        <p className="text-sm text-muted-foreground">Scan voter QR to mark attendance as present.</p>
+        <p className="text-sm text-muted-foreground">Scan attendance QR to mark attendance as present.</p>
       </div>
 
       <div className="rounded-xl border border-primary/20 bg-gradient-to-br from-primary/[0.08] via-card to-card p-4 shadow-sm">
@@ -387,7 +354,7 @@ export function AttendanceAccessPage() {
           <div className="min-w-0 flex-1">
             <p className="text-sm font-semibold text-foreground">Scan QR (Recommended)</p>
             <p className="mt-1 text-xs text-muted-foreground">
-              Each successful scan marks the voter as present immediately.
+              Each successful scan marks attendance as present immediately.
             </p>
           </div>
         </div>
@@ -398,7 +365,7 @@ export function AttendanceAccessPage() {
             onClick={() => {
               setScanOpen(true);
               setScanError(null);
-              setScanHint("Allow camera access and point to voter QR code.");
+              setScanHint("Allow camera access and point to attendance QR code.");
               setScanValidation(null);
             }}
             disabled={submitting}
@@ -412,7 +379,7 @@ export function AttendanceAccessPage() {
               scanOpen ? "bg-primary/15 text-primary" : "bg-secondary text-muted-foreground"
             }`}
           >
-            {scanOpen ? "Camera is running" : "Tap to scan voter QR"}
+            {scanOpen ? "Camera is running" : "Tap to scan attendance QR"}
           </span>
         </div>
 
@@ -431,7 +398,7 @@ export function AttendanceAccessPage() {
         >
           <p className="font-semibold">{scanValidation.message}</p>
           <p className="mt-1 text-xs">
-            {scanValidation.voterId ? `Voter ID: ${scanValidation.voterId} - ` : ""}
+            {scanValidation.reference ? `${scanValidation.reference} - ` : ""}
             {new Date(scanValidation.at).toLocaleTimeString()}
           </p>
         </div>
@@ -471,7 +438,7 @@ export function AttendanceAccessPage() {
               >
                 <p className="font-semibold">{scanValidation.message}</p>
                 <p className="mt-1 text-xs">
-                  {scanValidation.voterId ? `Voter ID: ${scanValidation.voterId} - ` : ""}
+                  {scanValidation.reference ? `${scanValidation.reference} - ` : ""}
                   {new Date(scanValidation.at).toLocaleTimeString()}
                 </p>
               </div>

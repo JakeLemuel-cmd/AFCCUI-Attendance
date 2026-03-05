@@ -130,16 +130,40 @@ class AttendanceController extends Controller
     {
         $data = $request->validate([
             'election_id' => ['required', 'integer', 'exists:elections,id'],
-            'voter_id' => ['required', 'string', 'max:100'],
+            'voter_id' => ['nullable', 'string', 'max:100', 'required_without:attendance_id'],
+            'attendance_id' => ['nullable', 'integer', 'exists:attendances,id'],
             'status' => ['required', 'in:present,absent'],
             'checked_in_at' => ['nullable', 'date'],
         ]);
 
-        $voterId = trim((string) $data['voter_id']);
-        $voter = User::query()
-            ->where('role', UserRole::VOTER->value)
-            ->where('voter_id', $voterId)
-            ->first();
+        $electionId = (int) $data['election_id'];
+        $attendanceId = isset($data['attendance_id']) ? (int) $data['attendance_id'] : null;
+        $voter = null;
+
+        if ($attendanceId !== null) {
+            $attendanceRecord = Attendance::query()
+                ->select(['id', 'user_id'])
+                ->whereKey($attendanceId)
+                ->where('election_id', $electionId)
+                ->first();
+
+            if (! $attendanceRecord) {
+                return response()->json([
+                    'message' => 'Attendance ID was not found for the selected election.',
+                ], 422);
+            }
+
+            $voter = User::query()
+                ->where('role', UserRole::VOTER->value)
+                ->whereKey((int) $attendanceRecord->user_id)
+                ->first();
+        } else {
+            $voterId = trim((string) ($data['voter_id'] ?? ''));
+            $voter = User::query()
+                ->where('role', UserRole::VOTER->value)
+                ->where('voter_id', $voterId)
+                ->first();
+        }
 
         if (! $voter) {
             return response()->json([
@@ -154,7 +178,6 @@ class AttendanceController extends Controller
         }
 
         $status = (string) $data['status'];
-        $electionId = (int) $data['election_id'];
         $checkedInAt = $status === AttendanceStatus::PRESENT->value
             ? (isset($data['checked_in_at']) ? Carbon::parse((string) $data['checked_in_at']) : now())
             : null;
@@ -1346,6 +1369,7 @@ class AttendanceController extends Controller
 
         return [
             'id' => $voter->id,
+            'attendance_id' => $attendance?->id,
             'election_id' => $electionId ?? 0,
             'user_id' => $voter->id,
             'status' => $status,

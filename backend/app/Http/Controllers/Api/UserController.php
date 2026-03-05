@@ -5,6 +5,7 @@ namespace App\Http\Controllers\Api;
 use App\Enums\UserRole;
 use App\Http\Controllers\Controller;
 use App\Http\Resources\UserResource;
+use App\Models\Attendance;
 use App\Models\User;
 use App\Models\Vote;
 use App\Services\AuditLogger;
@@ -42,6 +43,7 @@ class UserController extends Controller
             ->paginate($data['per_page'] ?? 25);
 
         $this->appendVoteStatus($voters->getCollection(), $data['election_id'] ?? null);
+        $this->appendAttendanceIds($voters->getCollection(), $data['election_id'] ?? null);
 
         return response()->json([
             'data' => UserResource::collection($voters->getCollection()),
@@ -1205,6 +1207,33 @@ class UserController extends Controller
 
             $voter->setAttribute('has_voted', (bool) $matchedVote);
             $voter->setAttribute('voted_at', $matchedVote?->voted_at);
+        }
+    }
+
+    private function appendAttendanceIds(EloquentCollection $voters, ?int $electionId): void
+    {
+        if ($voters->isEmpty()) {
+            return;
+        }
+
+        if (! $electionId) {
+            foreach ($voters as $voter) {
+                $voter->setAttribute('attendance_id', null);
+            }
+
+            return;
+        }
+
+        $attendanceByUserId = Attendance::query()
+            ->where('election_id', $electionId)
+            ->whereIn('user_id', $voters->pluck('id')->all())
+            ->select(['id', 'user_id'])
+            ->get()
+            ->keyBy('user_id');
+
+        foreach ($voters as $voter) {
+            $attendanceId = $attendanceByUserId->get($voter->id)?->id;
+            $voter->setAttribute('attendance_id', $attendanceId ? (int) $attendanceId : null);
         }
     }
 

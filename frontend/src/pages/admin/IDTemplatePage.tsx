@@ -666,7 +666,7 @@ export function IDTemplatePage() {
           <div className="space-y-1">
             <CardTitle>ID Template</CardTitle>
             <CardDescription>
-              Edit and preview the voter QR card layout. Saved changes are used when generating voter QR cards.
+              Edit and preview the attendance QR card layout. Saved changes are used when generating attendance QR cards.
             </CardDescription>
           </div>
           {!editing ? (

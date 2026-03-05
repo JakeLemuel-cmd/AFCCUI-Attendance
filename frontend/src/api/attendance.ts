@@ -21,7 +21,8 @@ interface GetAttendancesParams {
 
 interface UpsertAttendancePayload {
   election_id: number;
-  voter_id: string;
+  voter_id?: string;
+  attendance_id?: number;
   status: AttendanceStatus;
   checked_in_at?: string | null;
 }
@@ -59,8 +60,7 @@ export interface ImportAttendanceResponse {
 
 interface AttendanceAccessCheckInPayload {
   election_id: number;
-  voter_id: string;
-  voter_key: string;
+  attendance_id: number;
 }
 
 export interface AttendanceAccessCheckInResponse {
@@ -73,6 +73,7 @@ export interface AttendanceAccessCheckInResponse {
       is_active: boolean;
       attendance_status: AttendanceStatus;
     };
+    attendance_id?: number | null;
     election: {
       id: number;
       title: string;

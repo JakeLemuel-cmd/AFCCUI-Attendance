@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type ChangeEvent } from "react";
 import type { IScannerControls } from "@zxing/browser";
-import { CalendarCheck2, Camera, ChevronDown, Download, Link as LinkIcon, Plus, Trash2, Upload, UserCheck2, UserX, Users } from "lucide-react";
+import { CalendarCheck2, Camera, ChevronDown, Download, Link as LinkIcon, Plus, QrCode, Trash2, Upload, UserCheck2, UserX, Users } from "lucide-react";
+import QRCode from "qrcode";
 import { exportPresentAttendancesCsv, getAttendances, upsertAttendance } from "@/api/attendance";
 import { extractErrorMessage } from "@/api/client";
 import { getElections } from "@/api/elections";
@@ -22,6 +23,7 @@ import {
 } from "@/components/ui/alert-dialog";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { useAttendanceTask } from "@/hooks/useAttendanceTask";
+import { buildVoterQrCardPng, getStoredVoterCardTemplateLayout } from "@/lib/voterCardTemplate";
 import { cn } from "@/lib/utils";
 
 type ScanValidationTone = "success" | "warning" | "error";
@@ -29,7 +31,7 @@ type ScanValidationTone = "success" | "warning" | "error";
 interface ScanValidation {
   tone: ScanValidationTone;
   message: string;
-  voterId: string | null;
+  reference: string | null;
   at: number;
 }
 
@@ -41,7 +43,39 @@ interface AttendanceDashboardProps {
 
 const ATTENDANCE_PER_PAGE = 10;
 
-function parseVoterIdFromQr(rawValue: string): string | null {
+function buildAttendanceQrPayload(attendanceId: number): string {
+  return JSON.stringify({ attendance_id: attendanceId });
+}
+
+async function buildAttendanceQrCardDataUrl(options: {
+  attendanceId: number;
+  voterName: string;
+  branch: string;
+}) {
+  const payload = buildAttendanceQrPayload(options.attendanceId);
+  const qrDataUrl = await QRCode.toDataURL(payload, {
+    errorCorrectionLevel: "H",
+    margin: 4,
+    width: 280,
+    color: {
+      dark: "#000000",
+      light: "#ffffff",
+    },
+  });
+
+  return buildVoterQrCardPng({
+    qrDataUrl,
+    voterName: options.voterName,
+    branch: options.branch,
+    layout: getStoredVoterCardTemplateLayout(),
+  });
+}
+
+interface ParsedAttendanceQrReference {
+  attendanceId: number;
+}
+
+function parseAttendanceReferenceFromQr(rawValue: string): ParsedAttendanceQrReference | null {
   const normalized = rawValue
     .replace(/[\u2018\u2019]/g, "'")
     .replace(/[\u201c\u201d]/g, '"')
@@ -54,9 +88,9 @@ function parseVoterIdFromQr(rawValue: string): string | null {
 
   try {
     const parsed = JSON.parse(normalized) as Record<string, unknown>;
-    const voterId = String(parsed?.voter_id ?? parsed?.voterId ?? "").trim();
-    if (voterId !== "") {
-      return voterId;
+    const attendanceId = Number(parsed?.attendance_id ?? parsed?.attendanceId);
+    if (Number.isInteger(attendanceId) && attendanceId > 0) {
+      return { attendanceId };
     }
   } catch {
     // Continue with alternate formats.
@@ -64,9 +98,9 @@ function parseVoterIdFromQr(rawValue: string): string | null {
 
   try {
     const url = new URL(normalized, window.location.origin);
-    const voterId = (url.searchParams.get("voter_id") ?? url.searchParams.get("voterId") ?? "").trim();
-    if (voterId !== "") {
-      return voterId;
+    const attendanceId = Number(url.searchParams.get("attendance_id") ?? url.searchParams.get("attendanceId") ?? "");
+    if (Number.isInteger(attendanceId) && attendanceId > 0) {
+      return { attendanceId };
     }
   } catch {
     // Continue with raw query-string fallback.
@@ -75,14 +109,19 @@ function parseVoterIdFromQr(rawValue: string): string | null {
   const queryStart = normalized.indexOf("?");
   const queryString = queryStart >= 0 ? normalized.slice(queryStart) : normalized;
   const params = new URLSearchParams(queryString.startsWith("?") ? queryString : `?${queryString}`);
-  const queryVoterId = (params.get("voter_id") ?? params.get("voterId") ?? "").trim();
-  if (queryVoterId !== "") {
-    return queryVoterId;
+  const queryAttendanceId = Number(params.get("attendance_id") ?? params.get("attendanceId") ?? "");
+  if (Number.isInteger(queryAttendanceId) && queryAttendanceId > 0) {
+    return { attendanceId: queryAttendanceId };
   }
 
-  const inlineVoterId = normalized.match(/voter[_\s-]?id\s*[:=]\s*["']?([^"'\s,;|]+)["']?/i)?.[1]?.trim();
-  if (inlineVoterId) {
-    return inlineVoterId;
+  const inlineAttendanceId = Number(normalized.match(/attendance[_\s-]?id\s*[:=]\s*["']?(\d+)["']?/i)?.[1] ?? "");
+  if (Number.isInteger(inlineAttendanceId) && inlineAttendanceId > 0) {
+    return { attendanceId: inlineAttendanceId };
+  }
+
+  const directAttendanceId = Number(normalized);
+  if (Number.isInteger(directAttendanceId) && directAttendanceId > 0) {
+    return { attendanceId: directAttendanceId };
   }
 
   return null;
@@ -122,9 +161,13 @@ export function AttendanceDashboard({ view = "attendance" }: AttendanceDashboard
   const [uploadingQr, setUploadingQr] = useState(false);
   const [scanOpen, setScanOpen] = useState(false);
   const [scanError, setScanError] = useState<string | null>(null);
-  const [scanHint, setScanHint] = useState("Allow camera access and point to voter QR code.");
+  const [scanHint, setScanHint] = useState("Allow camera access and point to attendance QR code.");
   const [scanValidation, setScanValidation] = useState<ScanValidation | null>(null);
   const [actionsMenuOpen, setActionsMenuOpen] = useState(false);
+  const [attendanceQrRow, setAttendanceQrRow] = useState<Attendance | null>(null);
+  const [attendanceQrDataUrl, setAttendanceQrDataUrl] = useState<string | null>(null);
+  const [loadingAttendanceQr, setLoadingAttendanceQr] = useState(false);
+  const [attendanceQrError, setAttendanceQrError] = useState<string | null>(null);
   const protectedAttendanceEmail = "voter@voting.local";
   const { startImport, startDelete, action: attendanceTaskAction, status: attendanceTaskStatus, progress: attendanceTaskProgress } =
     useAttendanceTask();
@@ -139,7 +182,7 @@ export function AttendanceDashboard({ view = "attendance" }: AttendanceDashboard
   const mediaStreamRef = useRef<MediaStream | null>(null);
   const zxingControlsRef = useRef<IScannerControls | null>(null);
   const scanBusyRef = useRef(false);
-  const lastScannedRef = useRef<{ voterId: string; at: number } | null>(null);
+  const lastScannedRef = useRef<{ token: string; at: number } | null>(null);
 
   const loadAttendances = useCallback(async (electionId: number, page = 1) => {
     try {
@@ -190,7 +233,7 @@ export function AttendanceDashboard({ view = "attendance" }: AttendanceDashboard
   }, []);
 
   const handleScannedVoter = useCallback(
-    async (voterId: string) => {
+    async (reference: ParsedAttendanceQrReference) => {
       if (!activeElectionId) {
         const message = "No election selected for attendance scanning.";
         setNotice({
@@ -200,7 +243,7 @@ export function AttendanceDashboard({ view = "attendance" }: AttendanceDashboard
         setScanValidation({
           tone: "error",
           message,
-          voterId,
+          reference: `Attendance ID: ${reference.attendanceId}`,
           at: Date.now(),
         });
         return;
@@ -209,7 +252,7 @@ export function AttendanceDashboard({ view = "attendance" }: AttendanceDashboard
       try {
         const response = await upsertAttendance({
           election_id: activeElectionId,
-          voter_id: voterId,
+          attendance_id: reference.attendanceId,
           status: "present",
         });
 
@@ -221,7 +264,7 @@ export function AttendanceDashboard({ view = "attendance" }: AttendanceDashboard
         setScanValidation({
           tone: "success",
           message: response.message,
-          voterId,
+          reference: `Attendance ID: ${reference.attendanceId}`,
           at: Date.now(),
         });
         await loadAttendances(activeElectionId, recordsPage);
@@ -237,7 +280,7 @@ export function AttendanceDashboard({ view = "attendance" }: AttendanceDashboard
         setScanValidation({
           tone,
           message,
-          voterId,
+          reference: `Attendance ID: ${reference.attendanceId}`,
           at: Date.now(),
         });
       }
@@ -480,8 +523,39 @@ export function AttendanceDashboard({ view = "attendance" }: AttendanceDashboard
   const openScannerDialog = useCallback(() => {
     setScanOpen(true);
     setScanError(null);
-    setScanHint("Allow camera access and point to voter QR code.");
+    setScanHint("Allow camera access and point to attendance QR code.");
     setScanValidation(null);
+  }, []);
+
+  const openAttendanceQrDialog = useCallback(async (row: Attendance) => {
+    const attendanceId = row.attendance_id;
+    if (!attendanceId) {
+      setNotice({
+        tone: "warning",
+        message: "Attendance ID is not available for this row.",
+      });
+      return;
+    }
+
+    setAttendanceQrRow(row);
+    setAttendanceQrDataUrl(null);
+    setAttendanceQrError(null);
+    setLoadingAttendanceQr(true);
+
+    try {
+      const voterName = row.user?.name?.trim() || "Voter";
+      const branch = row.user?.branch?.trim() || "N/A";
+      const qrCardDataUrl = await buildAttendanceQrCardDataUrl({
+        attendanceId,
+        voterName,
+        branch,
+      });
+      setAttendanceQrDataUrl(qrCardDataUrl);
+    } catch (qrError) {
+      setAttendanceQrError(extractErrorMessage(qrError));
+    } finally {
+      setLoadingAttendanceQr(false);
+    }
   }, []);
 
   const processScannedQrValue = useCallback(
@@ -490,34 +564,35 @@ export function AttendanceDashboard({ view = "attendance" }: AttendanceDashboard
         return;
       }
 
-      const voterId = parseVoterIdFromQr(rawValue);
-      if (!voterId) {
-        const message = "QR detected but voter ID was not found in the code.";
+      const parsedReference = parseAttendanceReferenceFromQr(rawValue);
+      if (!parsedReference || !parsedReference.attendanceId) {
+        const message = "QR detected but attendance reference was not found in the code.";
         setScanError(message);
         setScanValidation({
           tone: "error",
           message,
-          voterId: null,
+          reference: null,
           at: Date.now(),
         });
         return;
       }
 
+      const scanToken = `attendance:${parsedReference.attendanceId}`;
       const now = Date.now();
-      if (lastScannedRef.current && lastScannedRef.current.voterId === voterId && now - lastScannedRef.current.at < 2000) {
+      if (lastScannedRef.current && lastScannedRef.current.token === scanToken && now - lastScannedRef.current.at < 2000) {
         return;
       }
 
-      lastScannedRef.current = { voterId, at: now };
+      lastScannedRef.current = { token: scanToken, at: now };
       scanBusyRef.current = true;
       setScanError(null);
-      setScanHint("Validating voter attendance...");
+      setScanHint("Validating attendance...");
 
       try {
-        await handleScannedVoter(voterId);
+        await handleScannedVoter(parsedReference);
       } finally {
         scanBusyRef.current = false;
-        setScanHint(scanOpen ? "Scanning QR code..." : "Allow camera access and point to voter QR code.");
+        setScanHint(scanOpen ? "Scanning QR code..." : "Allow camera access and point to attendance QR code.");
       }
     },
     [handleScannedVoter, scanOpen]
@@ -596,7 +671,7 @@ export function AttendanceDashboard({ view = "attendance" }: AttendanceDashboard
 
     const startScanner = async () => {
       setScanError(null);
-      setScanHint("Allow camera access and point to voter QR code.");
+      setScanHint("Allow camera access and point to attendance QR code.");
 
       if (!navigator.mediaDevices?.getUserMedia) {
         setScanError("Camera is not available in this browser.");
@@ -934,6 +1009,7 @@ export function AttendanceDashboard({ view = "attendance" }: AttendanceDashboard
                 <TableHead>Branch</TableHead>
                 <TableHead>Check-in</TableHead>
                 <TableHead>Attendance Status</TableHead>
+                <TableHead className="text-right">QR</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -952,6 +1028,9 @@ export function AttendanceDashboard({ view = "attendance" }: AttendanceDashboard
                       <TableCell>
                         <div className="h-6 w-20 animate-pulse rounded-full bg-secondary" />
                       </TableCell>
+                      <TableCell>
+                        <div className="ml-auto h-8 w-24 animate-pulse rounded bg-secondary" />
+                      </TableCell>
                     </TableRow>
                   ))
                 : visibleRecords.map((row) => (
@@ -966,11 +1045,25 @@ export function AttendanceDashboard({ view = "attendance" }: AttendanceDashboard
                       <Badge variant="secondary">Absent</Badge>
                     )}
                   </TableCell>
+                  <TableCell className="text-right">
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      disabled={!row.attendance_id}
+                      onClick={() => {
+                        void openAttendanceQrDialog(row);
+                      }}
+                    >
+                      <QrCode className="mr-1.5 h-4 w-4" />
+                      QR
+                    </Button>
+                  </TableCell>
                 </TableRow>
                   ))}
               {!loading && visibleRecords.length === 0 ? (
                 <TableRow>
-                  <TableCell colSpan={4} className="text-center text-muted-foreground">
+                  <TableCell colSpan={5} className="text-center text-muted-foreground">
                     No attendance records found.
                   </TableCell>
                 </TableRow>
@@ -1015,6 +1108,58 @@ export function AttendanceDashboard({ view = "attendance" }: AttendanceDashboard
           </div>
         </CardContent>
       </Card>
+
+      <AlertDialog
+        open={Boolean(attendanceQrRow)}
+        onOpenChange={(open) => {
+          if (!open) {
+            setAttendanceQrRow(null);
+            setAttendanceQrDataUrl(null);
+            setAttendanceQrError(null);
+            setLoadingAttendanceQr(false);
+          }
+        }}
+      >
+        <AlertDialogContent className="max-w-5xl">
+          <AlertDialogHeader>
+            <AlertDialogTitle className="inline-flex items-center gap-2">
+              <QrCode className="h-4 w-4" />
+              Attendance QR Card
+            </AlertDialogTitle>
+            <AlertDialogDescription>
+              {attendanceQrRow ? `${attendanceQrRow.user?.name ?? "Voter"} - Attendance ID: ${attendanceQrRow.attendance_id ?? "-"}` : "Attendance QR preview."}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+
+          <div className="space-y-3">
+            {loadingAttendanceQr ? (
+              <div className="rounded-lg border bg-muted/30 p-4">
+                <div className="mx-auto h-56 w-full max-w-3xl animate-pulse rounded-md bg-secondary" />
+              </div>
+            ) : attendanceQrDataUrl ? (
+              <div className="rounded-lg border bg-muted/10 p-4">
+                <img
+                  src={attendanceQrDataUrl}
+                  alt={`Attendance QR card for ${attendanceQrRow?.user?.name ?? "voter"}`}
+                  className="mx-auto w-full max-w-3xl rounded-md"
+                />
+              </div>
+            ) : (
+              <p className="text-sm text-muted-foreground">No QR preview available.</p>
+            )}
+            {attendanceQrError ? <p className="text-sm text-destructive">{attendanceQrError}</p> : null}
+            {attendanceQrRow?.attendance_id ? (
+              <p className="rounded-md bg-muted px-3 py-2 text-xs text-muted-foreground">
+                Payload: {buildAttendanceQrPayload(attendanceQrRow.attendance_id)}
+              </p>
+            ) : null}
+          </div>
+
+          <AlertDialogFooter>
+            <AlertDialogCancel>Close</AlertDialogCancel>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       <AlertDialog
         open={addAttendanceOpen}
@@ -1223,7 +1368,7 @@ export function AttendanceDashboard({ view = "attendance" }: AttendanceDashboard
               >
                 <p className="font-semibold">{scanValidation.message}</p>
                 <p className="mt-1 text-xs">
-                  {scanValidation.voterId ? `Voter ID: ${scanValidation.voterId} - ` : ""}
+                  {scanValidation.reference ? `${scanValidation.reference} - ` : ""}
                   {new Date(scanValidation.at).toLocaleTimeString()}
                 </p>
               </div>

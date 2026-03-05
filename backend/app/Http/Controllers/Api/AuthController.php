@@ -26,26 +26,38 @@ class AuthController extends Controller
     {
         $data = $request->validate([
             'election_id' => ['required', 'integer', 'exists:elections,id'],
-            'voter_id' => ['required', 'string', 'max:100'],
-            'voter_key' => ['required', 'string', 'max:255'],
+            'attendance_id' => ['required', 'integer', 'exists:attendances,id'],
         ]);
+
+        $electionId = (int) $data['election_id'];
+        $attendanceId = (int) $data['attendance_id'];
+        $attendanceRecord = Attendance::query()
+            ->select(['id', 'user_id'])
+            ->whereKey($attendanceId)
+            ->where('election_id', $electionId)
+            ->first();
+
+        if (! $attendanceRecord) {
+            throw ValidationException::withMessages([
+                'attendance_id' => ['Attendance ID was not found for this election.'],
+            ]);
+        }
 
         $voter = User::query()
             ->where('role', UserRole::VOTER->value)
-            ->where('voter_id', trim((string) $data['voter_id']))
-            ->where('voter_key', (string) $data['voter_key'])
+            ->whereKey((int) $attendanceRecord->user_id)
             ->first();
 
         if (! $voter) {
             throw ValidationException::withMessages([
-                'voter_id' => ['The provided voter credentials are incorrect.'],
+                'attendance_id' => ['Attendance ID was not found for an active voter account.'],
             ]);
         }
 
         /** @var Election $election */
         $election = Election::query()
             ->select(['id', 'title', 'status', 'start_datetime', 'end_datetime'])
-            ->findOrFail((int) $data['election_id']);
+            ->findOrFail($electionId);
 
         $attendanceForElection = Attendance::query()
             ->where('election_id', $election->id)
@@ -57,18 +69,34 @@ class AuthController extends Controller
         if (! $voter->is_active) {
             return response()->json([
                 'message' => 'Voter account is inactive.',
-                'data' => $this->attendanceAccessPayload($voter, $election, $alreadyPresentForElection, false, null, $statusForElection),
+                'data' => $this->attendanceAccessPayload(
+                    $voter,
+                    $election,
+                    $alreadyPresentForElection,
+                    false,
+                    null,
+                    $statusForElection,
+                    $attendanceForElection?->id
+                ),
             ], 403);
         }
 
         if ($election->status !== ElectionStatus::OPEN->value || $election->hasEnded()) {
             return response()->json([
                 'message' => 'Attendance access is available only while election is open.',
-                'data' => $this->attendanceAccessPayload($voter, $election, $alreadyPresentForElection, false, null, $statusForElection),
+                'data' => $this->attendanceAccessPayload(
+                    $voter,
+                    $election,
+                    $alreadyPresentForElection,
+                    false,
+                    null,
+                    $statusForElection,
+                    $attendanceForElection?->id
+                ),
             ], 403);
         }
 
-        [$alreadyPresent, $markedAt] = DB::transaction(function () use ($voter, $election): array {
+        [$alreadyPresent, $markedAt, $resolvedAttendanceId] = DB::transaction(function () use ($voter, $election): array {
             $lockedVoter = User::query()
                 ->whereKey($voter->id)
                 ->lockForUpdate()
@@ -84,6 +112,7 @@ class AuthController extends Controller
                 return [
                     true,
                     optional($attendance->checked_in_at ?? $attendance->updated_at)->toIso8601String(),
+                    (int) $attendance->id,
                 ];
             }
 
@@ -96,7 +125,7 @@ class AuthController extends Controller
                     'source' => 'scanner',
                 ])->save();
             } else {
-                Attendance::query()->create([
+                $attendance = Attendance::query()->create([
                     'election_id' => $election->id,
                     'user_id' => $lockedVoter->id,
                     'status' => AttendanceStatus::PRESENT->value,
@@ -109,7 +138,7 @@ class AuthController extends Controller
                 'attendance_status' => AttendanceStatus::PRESENT->value,
             ])->save();
 
-            return [false, $checkedInAt->toIso8601String()];
+            return [false, $checkedInAt->toIso8601String(), (int) $attendance->id];
         });
 
         if ($alreadyPresent) {
@@ -121,7 +150,8 @@ class AuthController extends Controller
                     true,
                     false,
                     $markedAt,
-                    AttendanceStatus::PRESENT->value
+                    AttendanceStatus::PRESENT->value,
+                    $resolvedAttendanceId
                 ),
             ]);
         }
@@ -140,7 +170,8 @@ class AuthController extends Controller
                 false,
                 true,
                 $markedAt,
-                AttendanceStatus::PRESENT->value
+                AttendanceStatus::PRESENT->value,
+                $resolvedAttendanceId
             ),
         ]);
     }
@@ -373,13 +404,15 @@ class AuthController extends Controller
         bool $alreadyPresent,
         bool $markedPresent,
         ?string $markedAt,
-        ?string $attendanceStatus = null
+        ?string $attendanceStatus = null,
+        ?int $attendanceId = null
     ): array {
         $status = in_array($attendanceStatus, ['present', 'absent'], true)
             ? $attendanceStatus
             : AttendanceStatus::ABSENT->value;
 
         return [
+            'attendance_id' => $attendanceId,
             'voter' => [
                 'name' => $voter->name,
                 'branch' => $voter->branch,

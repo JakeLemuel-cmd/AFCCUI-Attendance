@@ -9,6 +9,7 @@ export interface User {
   email: string | null;
   voter_id: string | null;
   voter_key: string | null;
+  attendance_id?: number | null;
   role: UserRole;
   is_active: boolean;
   attendance_status: AttendanceStatus;
@@ -55,6 +56,7 @@ export interface Election {
 
 export interface Attendance {
   id: number;
+  attendance_id?: number | null;
   election_id: number;
   user_id: number;
   status: AttendanceStatus;

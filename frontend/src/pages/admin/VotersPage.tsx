@@ -72,8 +72,8 @@ const BRANCH_FILTER_OPTIONS = [
 
 const QR_EXPORT_BATCH_SIZE = 8;
 
-function buildVoterQrPayload(voterId: string, voterKey: string): string {
-  return `voter_id=${encodeURIComponent(voterId)}&voter_key=${encodeURIComponent(voterKey)}`;
+function buildAttendanceQrPayload(attendanceId: number): string {
+  return JSON.stringify({ attendance_id: attendanceId });
 }
 
 function sanitizeFileName(value: string) {
@@ -99,13 +99,12 @@ function downloadBlob(blob: Blob, fileName: string) {
 }
 
 async function buildVoterQrCardDataUrl(options: {
-  voterId: string;
-  voterKey: string;
+  attendanceId: number;
   voterName: string;
   branch: string;
   layout?: Parameters<typeof buildVoterQrCardPng>[0]["layout"];
 }) {
-  const payload = buildVoterQrPayload(options.voterId, options.voterKey);
+  const payload = buildAttendanceQrPayload(options.attendanceId);
   const qrDataUrl = await QRCode.toDataURL(payload, {
     errorCorrectionLevel: "H",
     margin: 4,
@@ -391,7 +390,7 @@ export function VotersPage() {
   };
 
   const buildVoterCardFileName = (voter: User) => {
-    const voterId = voter.voter_id ?? "voter";
+    const voterId = typeof voter.attendance_id === "number" ? `aid-${voter.attendance_id}` : voter.voter_id ?? "voter";
     const branch = voter.branch?.trim() ? voter.branch.trim() : "N/A";
     const safeName = sanitizeFileName(voter.name);
     const safeBranch = sanitizeFileName(branch);
@@ -405,13 +404,19 @@ export function VotersPage() {
       setExportQrProgress(null);
       setError(null);
       setSuccess(null);
+
+      if (!electionId) {
+        setError("Select an election first to export attendance QR cards.");
+        return;
+      }
+
       const templateLayout = getStoredVoterCardTemplateLayout();
 
       const allVoters = await fetchAllVotersForQr();
-      const exportableVoters = allVoters.filter((voter) => voter.voter_id && voter.voter_key);
+      const exportableVoters = allVoters.filter((voter) => typeof voter.attendance_id === "number");
 
       if (exportableVoters.length === 0) {
-        setError("No voters with both voter ID and voter key were found for QR export.");
+        setError("No attendance IDs found. Import attendance first for this election, then try again.");
         return;
       }
 
@@ -423,10 +428,9 @@ export function VotersPage() {
         const batch = exportableVoters.slice(batchStart, batchStart + QR_EXPORT_BATCH_SIZE);
         const generatedCards = await Promise.all(
           batch.map(async (voter, batchIndex) => {
-            const voterId = voter.voter_id as string;
-            const voterKey = voter.voter_key as string;
+            const attendanceId = voter.attendance_id as number;
             const branch = voter.branch?.trim() ? voter.branch.trim() : "N/A";
-            const qrPayload = buildVoterQrPayload(voterId, voterKey);
+            const qrPayload = buildAttendanceQrPayload(attendanceId);
             const qrDataUrl = await QRCode.toDataURL(qrPayload, {
               errorCorrectionLevel: "H",
               margin: 4,
@@ -463,22 +467,22 @@ export function VotersPage() {
       }
 
       const readmeLines = [
-        "Coop Vote - Voter QR Card Export",
+        "Coop Vote - Attendance QR Card Export",
         "",
         "Each PNG is an ID-style card: QR on the left, voter details on the right.",
-        "QR payload format: voter_id=<value>&voter_key=<value>",
-        electionId ? `Election access route: /access/${electionId}` : "Election access route: /access/{electionId}",
+        "QR payload format: {\"attendance_id\":<value>}",
+        electionId ? `Attendance access route: /attendance-access/${electionId}` : "Attendance access route: /attendance-access/{electionId}",
         "",
-        "Scan from the Voter Access page.",
+        "Scan from the Attendance Access page.",
       ];
 
       zip.file("README.txt", readmeLines.join("\n"));
 
       const zipBlob = await zip.generateAsync({ type: "blob" });
       const timestamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-");
-      downloadBlob(zipBlob, `voter_qr_cards_${timestamp}.zip`);
+      downloadBlob(zipBlob, `attendance_qr_cards_${timestamp}.zip`);
 
-      setSuccess(`Exported ${exportableVoters.length} voter QR cards.`);
+      setSuccess(`Exported ${exportableVoters.length} attendance QR cards.`);
       setMenuOpen(false);
     } catch (exportError) {
       if (exportError instanceof Error && exportError.message.trim() !== "") {
@@ -493,8 +497,13 @@ export function VotersPage() {
   };
 
   const handleOpenVoterQr = async (voter: User) => {
-    if (!voter.voter_id || !voter.voter_key) {
-      setError(`Cannot generate QR for "${voter.name}" because voter ID or voter key is missing.`);
+    if (!electionId) {
+      setError("Select an election first to generate attendance QR.");
+      return;
+    }
+
+    if (typeof voter.attendance_id !== "number") {
+      setError(`Cannot generate attendance QR for "${voter.name}" because attendance ID is missing. Import attendance first.`);
       return;
     }
 
@@ -507,8 +516,7 @@ export function VotersPage() {
       const branch = voter.branch?.trim() ? voter.branch.trim() : "N/A";
       const templateLayout = getStoredVoterCardTemplateLayout();
       const cardDataUrl = await buildVoterQrCardDataUrl({
-        voterId: voter.voter_id,
-        voterKey: voter.voter_key,
+        attendanceId: voter.attendance_id,
         voterName: voter.name,
         branch,
         layout: templateLayout,
@@ -768,7 +776,7 @@ export function VotersPage() {
                     ? exportQrProgress
                       ? `Generating QR Cards (${exportQrProgress.processed}/${exportQrProgress.total})...`
                       : "Generating QR Cards..."
-                    : "Export Voter QR Cards"}
+                    : "Export Attendance QR Cards"}
                 </button>
                 <button
                   className="inline-flex w-full items-center gap-2 rounded px-3 py-2 text-left text-sm text-destructive hover:bg-destructive/10 disabled:cursor-not-allowed disabled:opacity-60"
@@ -919,6 +927,7 @@ export function VotersPage() {
               <TableHead>BRANCH</TableHead>
               <TableHead>VOTER ID</TableHead>
               <TableHead>VOTER KEY</TableHead>
+              <TableHead>ATTENDANCE ID</TableHead>
               <TableHead>STATUS</TableHead>
               <TableHead>ACTIONS</TableHead>
             </TableRow>
@@ -943,6 +952,9 @@ export function VotersPage() {
                       <div className="h-6 w-20 animate-pulse rounded-full bg-secondary" />
                     </TableCell>
                     <TableCell>
+                      <div className="h-3 w-20 animate-pulse rounded bg-secondary" />
+                    </TableCell>
+                    <TableCell>
                       <div className="flex items-center gap-2">
                         <div className="h-9 w-9 animate-pulse rounded-[9px] bg-secondary" />
                         <div className="h-9 w-9 animate-pulse rounded-[9px] bg-secondary" />
@@ -957,6 +969,7 @@ export function VotersPage() {
                     <TableCell>{voter.branch ?? "-"}</TableCell>
                     <TableCell>{voter.voter_id ?? "-"}</TableCell>
                     <TableCell>{voter.voter_key ?? "-"}</TableCell>
+                    <TableCell>{typeof voter.attendance_id === "number" ? voter.attendance_id : "-"}</TableCell>
                     <TableCell>
                       {voter.is_active ? (
                         <Badge className="bg-emerald-100 text-emerald-700 hover:bg-emerald-100">Active</Badge>
@@ -973,6 +986,7 @@ export function VotersPage() {
                           size="sm"
                           variant="outline"
                           className="border-violet-200 text-violet-700 hover:border-violet-300 hover:bg-violet-50 hover:text-violet-800"
+                          disabled={typeof voter.attendance_id !== "number"}
                           onClick={() => {
                             void handleOpenVoterQr(voter);
                           }}
@@ -1009,7 +1023,7 @@ export function VotersPage() {
 
             {!loading && voters.length === 0 ? (
               <TableRow>
-                <TableCell colSpan={6} className="text-center text-muted-foreground">
+                <TableCell colSpan={7} className="text-center text-muted-foreground">
                   No voters found.
                 </TableCell>
               </TableRow>
@@ -1060,15 +1074,15 @@ export function VotersPage() {
           <AlertDialogHeader>
             <AlertDialogTitle className="inline-flex items-center gap-2">
               <QrCode className="h-5 w-5 text-primary" />
-              Voter QR Card
+              Attendance QR Card
             </AlertDialogTitle>
             <AlertDialogDescription>
               {qrVoter ? (
                 <>
-                  {qrVoter.name} {qrVoter.branch ? `(${qrVoter.branch})` : ""} - Voter ID: {qrVoter.voter_id ?? "-"}
+                  {qrVoter.name} {qrVoter.branch ? `(${qrVoter.branch})` : ""} - Attendance ID: {qrVoter.attendance_id ?? "-"}
                 </>
               ) : (
-                "Preview voter QR card."
+                "Preview attendance QR card."
               )}
             </AlertDialogDescription>
           </AlertDialogHeader>

@@ -79,7 +79,7 @@ export const DEFAULT_VOTER_CARD_TEMPLATE_LAYOUT: VoterCardTemplateLayout = {
   nameColor: "#111827",
   branchColor: "#334155",
   footerColor: "#6b7280",
-  footerText: "Coop Vote",
+  footerText: "",
 };
 
 function clampNumber(value: unknown, fallback: number, min: number, max: number) {
@@ -110,6 +110,8 @@ function toOptionalStringValue(value: unknown, fallback: string) {
 
 export function sanitizeVoterCardTemplateLayout(partial: Partial<VoterCardTemplateLayout>): VoterCardTemplateLayout {
   const fallback = DEFAULT_VOTER_CARD_TEMPLATE_LAYOUT;
+  const normalizedFooterText = toOptionalStringValue(partial.footerText, fallback.footerText);
+  const footerText = normalizedFooterText.toLowerCase() === "coop vote" ? "" : normalizedFooterText;
 
   return {
     canvasWidth: clampNumber(partial.canvasWidth, fallback.canvasWidth, 800, 2000),
@@ -149,7 +151,7 @@ export function sanitizeVoterCardTemplateLayout(partial: Partial<VoterCardTempla
     nameColor: toStringValue(partial.nameColor, fallback.nameColor),
     branchColor: toStringValue(partial.branchColor, fallback.branchColor),
     footerColor: toStringValue(partial.footerColor, fallback.footerColor),
-    footerText: toStringValue(partial.footerText, fallback.footerText),
+    footerText,
   };
 }
 
@@ -1001,9 +1003,11 @@ export async function buildVoterQrCardCanvas(options: RenderVoterQrCardOptions) 
     );
   }
 
-  context.fillStyle = resolvedLayout.footerColor;
-  context.font = `500 ${Math.max(18, Math.round(resolvedLayout.branchFontSize * 0.88))}px Segoe UI, Arial, sans-serif`;
-  context.fillText(resolvedLayout.footerText, resolvedLayout.textX, resolvedLayout.footerY);
+  if (resolvedLayout.footerText.trim() !== "") {
+    context.fillStyle = resolvedLayout.footerColor;
+    context.font = `500 ${Math.max(18, Math.round(resolvedLayout.branchFontSize * 0.88))}px Segoe UI, Arial, sans-serif`;
+    context.fillText(resolvedLayout.footerText, resolvedLayout.textX, resolvedLayout.footerY);
+  }
 
   return canvas;
 }

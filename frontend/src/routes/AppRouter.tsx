@@ -13,6 +13,7 @@ import { ResultsPage } from "@/pages/voting/ResultsPage";
 import { AdminDashboardPage } from "@/pages/admin/AdminDashboardPage";
 import { VotersPage } from "@/pages/admin/VotersPage";
 import { BallotPage } from "@/pages/admin/BallotPage";
+import { Raffle } from "@/pages/admin/Raffle";
 import { SettingsPage } from "@/pages/admin/SettingsPage";
 import { IDTemplatePage } from "@/pages/admin/IDTemplatePage";
 import { AttendanceDashboard } from "@/pages/admin/AttendanceDashboard";
@@ -77,6 +78,7 @@ export function AppRouter() {
               <Route path="/admin/attendance/scanner" element={<Navigate to="/admin/attendance" replace />} />
               <Route path="/admin/voters" element={<VotersPage />} />
               <Route path="/admin/ballot" element={<BallotPage />} />
+              <Route path="/admin/raffle" element={<Raffle />} />
               <Route path="/admin/settings" element={<SettingsPage />} />
               <Route path="/admin/settings/id-template" element={<IDTemplatePage />} />
               <Route path="/admin/elections/create" element={<CreateElectionPage />} />

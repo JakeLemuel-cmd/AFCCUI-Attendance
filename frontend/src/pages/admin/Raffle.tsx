@@ -50,6 +50,30 @@ type PrizeWinnersStorage = Record<string, PrizeWinnersByPrize>;
 const RAFFLE_PRIZES_STORAGE_KEY = "coopvote.raffle.prizes.v2";
 const RAFFLE_PRIZE_WINNERS_STORAGE_KEY = "coopvote.raffle.prize_winners.v2";
 
+function escapeCsvCell(value: string): string {
+  const normalized = value.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+  if (/[",\n]/.test(normalized)) {
+    return `"${normalized.replace(/"/g, "\"\"")}"`;
+  }
+  return normalized;
+}
+
+function downloadCsvFile(csvContent: string, fileName: string) {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.setAttribute("download", fileName);
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+  URL.revokeObjectURL(url);
+}
+
 function readPrizeStorage(): PrizeStorage {
   if (typeof window === "undefined") {
     return {};
@@ -164,6 +188,7 @@ export function Raffle() {
   const [showPrizeEditor, setShowPrizeEditor] = useState(false);
   const [actionsMenuOpen, setActionsMenuOpen] = useState(false);
   const [resetWinnersConfirmOpen, setResetWinnersConfirmOpen] = useState(false);
+  const [resetPrizesConfirmOpen, setResetPrizesConfirmOpen] = useState(false);
   const [prizeNameInput, setPrizeNameInput] = useState("");
   const [prizeCountInput, setPrizeCountInput] = useState("10");
   const [prizeError, setPrizeError] = useState<string | null>(null);
@@ -178,6 +203,7 @@ export function Raffle() {
   const animationIntervalRef = useRef<number | null>(null);
   const animationTimeoutRef = useRef<number | null>(null);
   const actionsMenuRef = useRef<HTMLDivElement | null>(null);
+  const requestedFullscreenRef = useRef(false);
 
   const stopAnimation = useCallback(() => {
     if (animationIntervalRef.current !== null) {
@@ -191,11 +217,67 @@ export function Raffle() {
     }
   }, []);
 
+  const enterActualFullscreen = useCallback(() => {
+    if (typeof document === "undefined" || document.fullscreenElement) {
+      return;
+    }
+
+    void document.documentElement
+      .requestFullscreen()
+      .then(() => {
+        requestedFullscreenRef.current = true;
+      })
+      .catch(() => {
+        requestedFullscreenRef.current = false;
+      });
+  }, []);
+
+  const exitActualFullscreen = useCallback(() => {
+    if (typeof document === "undefined") {
+      return;
+    }
+
+    if (!document.fullscreenElement) {
+      requestedFullscreenRef.current = false;
+      return;
+    }
+
+    void document.exitFullscreen().finally(() => {
+      requestedFullscreenRef.current = false;
+    });
+  }, []);
+
   useEffect(() => {
     return () => {
       stopAnimation();
+      exitActualFullscreen();
     };
-  }, [stopAnimation]);
+  }, [exitActualFullscreen, stopAnimation]);
+
+  useEffect(() => {
+    const handleFullscreenChange = () => {
+      if (typeof document === "undefined") {
+        return;
+      }
+
+      if (!document.fullscreenElement) {
+        requestedFullscreenRef.current = false;
+        setShowFullscreenDraw(false);
+        setDrawProgress(null);
+      }
+    };
+
+    document.addEventListener("fullscreenchange", handleFullscreenChange);
+    return () => {
+      document.removeEventListener("fullscreenchange", handleFullscreenChange);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!showFullscreenDraw && requestedFullscreenRef.current) {
+      exitActualFullscreen();
+    }
+  }, [exitActualFullscreen, showFullscreenDraw]);
 
   useEffect(() => {
     const handleClickOutside = (event: MouseEvent) => {
@@ -271,6 +353,7 @@ export function Raffle() {
       setShowPrizeEditor(false);
       setActionsMenuOpen(false);
       setResetWinnersConfirmOpen(false);
+      setResetPrizesConfirmOpen(false);
       setPrizeError(null);
       return;
     }
@@ -290,6 +373,7 @@ export function Raffle() {
     setShowPrizeEditor(false);
     setActionsMenuOpen(false);
     setResetWinnersConfirmOpen(false);
+    setResetPrizesConfirmOpen(false);
     setPrizeError(null);
     void loadPresentParticipants(activeElectionId);
   }, [activeElectionId, loadPresentParticipants]);
@@ -494,6 +578,44 @@ export function Raffle() {
     setActionsMenuOpen(false);
   }, [activeElectionId]);
 
+  const handleResetPrizes = useCallback(() => {
+    if (!activeElectionId) {
+      return;
+    }
+
+    setPrizes([]);
+    setSelectedPrizeId("");
+    setWinnerViewPrizeId("");
+    setWinnersByPrize({});
+    saveElectionPrizes(activeElectionId, []);
+    saveElectionPrizeWinners(activeElectionId, {});
+    setLatestWinner(null);
+    setSpotlightName("-");
+    setShowFullscreenDraw(false);
+    setDrawProgress(null);
+    setResetPrizesConfirmOpen(false);
+    setActionsMenuOpen(false);
+    setShowPrizeEditor(false);
+    setPrizeError(null);
+  }, [activeElectionId]);
+
+  const handleExportWinners = useCallback(() => {
+    if (!activeElectionId || prizes.length === 0) {
+      return;
+    }
+
+    const header = "Prize Name,Winner Name";
+    const rows = prizes.flatMap((prize) => {
+      const prizeWinners = winnersByPrize[prize.id] ?? [];
+      return prizeWinners.map((winner) =>
+        [escapeCsvCell(prize.prizeName), escapeCsvCell(winner.name)].join(",")
+      );
+    });
+    const csv = [header, ...rows].join("\n");
+    downloadCsvFile(csv, `raffle_winners_election_${activeElectionId}.csv`);
+    setActionsMenuOpen(false);
+  }, [activeElectionId, prizes, winnersByPrize]);
+
   const winnerViewPrize = useMemo(
     () => prizes.find((prize) => prize.id === winnerViewPrizeId) ?? null,
     [prizes, winnerViewPrizeId]
@@ -572,6 +694,25 @@ export function Raffle() {
                   }}
                 >
                   Add Prize
+                </button>
+                <button
+                  type="button"
+                  className="inline-flex w-full items-center gap-2 rounded px-3 py-2 text-left text-sm hover:bg-muted disabled:cursor-not-allowed disabled:opacity-60"
+                  disabled={drawing || loading || !hasAnyWinners}
+                  onClick={handleExportWinners}
+                >
+                  Export Winners
+                </button>
+                <button
+                  type="button"
+                  className="inline-flex w-full items-center gap-2 rounded px-3 py-2 text-left text-sm text-destructive hover:bg-muted disabled:cursor-not-allowed disabled:opacity-60"
+                  disabled={drawing || loading || prizes.length === 0}
+                  onClick={() => {
+                    setResetPrizesConfirmOpen(true);
+                    setActionsMenuOpen(false);
+                  }}
+                >
+                  Reset Prizes
                 </button>
                 <button
                   type="button"
@@ -666,6 +807,7 @@ export function Raffle() {
                   onClick={() => {
                     setShowFullscreenDraw(true);
                     setDrawProgress(null);
+                    enterActualFullscreen();
                   }}
                   disabled={!canDraw}
                 >
@@ -689,8 +831,8 @@ export function Raffle() {
       </Card>
 
       {showFullscreenDraw ? (
-        <div className="fixed inset-0 z-50 flex bg-background/95 p-3 sm:p-8">
-          <div className="mx-auto flex w-full max-w-6xl flex-1 flex-col rounded-2xl border bg-card p-6 shadow-2xl sm:p-8">
+        <div className="fixed inset-0 z-50 flex h-screen w-screen bg-background">
+          <div className="flex h-full w-full flex-1 flex-col bg-card p-4 sm:p-8">
             <div className="flex flex-wrap items-start justify-between gap-3">
               <div className="space-y-1">
                 <p className="text-sm uppercase tracking-[0.14em] text-muted-foreground">Fullscreen Draw</p>
@@ -716,6 +858,7 @@ export function Raffle() {
                   if (!drawing) {
                     setShowFullscreenDraw(false);
                     setDrawProgress(null);
+                    exitActualFullscreen();
                   }
                 }}
                 disabled={drawing}
@@ -823,6 +966,27 @@ export function Raffle() {
               disabled={drawing}
             >
               Delete Winners
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      <AlertDialog open={resetPrizesConfirmOpen} onOpenChange={setResetPrizesConfirmOpen}>
+        <AlertDialogContent className="max-w-md">
+          <AlertDialogHeader>
+            <AlertDialogTitle className="text-destructive">Reset Prizes</AlertDialogTitle>
+            <AlertDialogDescription>
+              This will delete all saved prizes and their winner lists for the current election. This action cannot be undone.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={drawing}>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90 hover:text-destructive-foreground"
+              onClick={handleResetPrizes}
+              disabled={drawing}
+            >
+              Delete Prizes
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

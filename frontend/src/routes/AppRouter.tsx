@@ -10,7 +10,6 @@ import { AttendanceAccessPage } from "@/pages/auth/AttendanceAccessPage";
 import { ActiveElectionsPage } from "@/pages/elections/ActiveElectionsPage";
 import { VotingPage } from "@/pages/voting/VotingPage";
 import { ResultsPage } from "@/pages/voting/ResultsPage";
-import { AdminDashboardPage } from "@/pages/admin/AdminDashboardPage";
 import { VotersPage } from "@/pages/admin/VotersPage";
 import { BallotPage } from "@/pages/admin/BallotPage";
 import { Raffle } from "@/pages/admin/Raffle";
@@ -44,7 +43,7 @@ function HomeRedirect() {
     return <Navigate to="/elections/active" replace />;
   }
 
-  return <Navigate to="/admin/dashboard" replace />;
+  return <Navigate to="/admin/attendance" replace />;
 }
 
 export function AppRouter() {
@@ -70,8 +69,8 @@ export function AppRouter() {
             </Route>
 
             <Route element={<RoleRoute roles={["super_admin", "election_admin"]} />}>
-              <Route path="/admin" element={<Navigate to="/admin/dashboard" replace />} />
-              <Route path="/admin/dashboard" element={<AdminDashboardPage />} />
+              <Route path="/admin" element={<Navigate to="/admin/attendance" replace />} />
+              <Route path="/admin/dashboard" element={<Navigate to="/admin/attendance" replace />} />
               <Route path="/admin/attendance" element={<AttendanceDashboard view="attendance" />} />
               <Route path="/admin/attendance/records" element={<AttendanceDashboard view="records" />} />
               <Route path="/admin/attendance/export" element={<Navigate to="/admin/attendance/records" replace />} />
@@ -79,6 +78,7 @@ export function AppRouter() {
               <Route path="/admin/voters" element={<VotersPage />} />
               <Route path="/admin/ballot" element={<BallotPage />} />
               <Route path="/admin/raffle" element={<Raffle />} />
+              <Route path="/admin/raffle/winners" element={<Raffle view="winners" />} />
               <Route path="/admin/settings" element={<SettingsPage />} />
               <Route path="/admin/settings/id-template" element={<IDTemplatePage />} />
               <Route path="/admin/elections/create" element={<CreateElectionPage />} />

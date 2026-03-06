@@ -4,7 +4,6 @@ import {
   CalendarCheck2,
   ChevronDown,
   ChevronRight,
-  LayoutDashboard,
   LogOut,
   Menu,
   Settings,
@@ -34,7 +33,6 @@ interface NavItem {
 
 const NAV_ITEMS: NavItem[] = [
   { label: "Ballot", path: "/elections/active", roles: ["voter"], icon: Vote },
-  { label: "Dashboard", path: "/admin/dashboard", roles: ["super_admin", "election_admin"], icon: LayoutDashboard },
   {
     label: "Attendance",
     path: "/admin/attendance",
@@ -44,7 +42,15 @@ const NAV_ITEMS: NavItem[] = [
       { label: "Attendance Records", path: "/admin/attendance/records" },
     ],
   },
-  { label: "Raffle", path: "/admin/raffle", roles: ["super_admin", "election_admin"], icon: Ticket },
+  {
+    label: "Raffle",
+    path: "/admin/raffle",
+    roles: ["super_admin", "election_admin"],
+    icon: Ticket,
+    children: [
+      { label: "Winners", path: "/admin/raffle/winners" },
+    ],
+  },
   {
     label: "Settings",
     path: "/admin/settings",
@@ -92,7 +98,7 @@ export function DashboardLayout() {
     return null;
   }
 
-  const homePath = user.role === "voter" ? "/elections/active" : "/admin/dashboard";
+  const homePath = user.role === "voter" ? "/elections/active" : "/admin/attendance";
   const visibleNav = NAV_ITEMS.filter((item) => item.roles.includes(user.role));
   const visibleLeafNav = visibleNav.flatMap((item) =>
     item.children && item.children.length > 0
@@ -203,7 +209,7 @@ export function DashboardLayout() {
               desktopSidebarCollapsed ? "md:justify-center" : "flex-1"
             }`}
             onClick={() => setMobileSidebarOpen(false)}
-            title="Coop Vote"
+            title="Attendance"
           >
             <img
               src={coopVoteLogo}
@@ -214,7 +220,7 @@ export function DashboardLayout() {
               }}
               className={`rounded bg-white/95 p-0.5 ${desktopSidebarCollapsed ? "h-7 w-7 object-cover object-left" : "h-9 w-auto shrink-0"}`}
             />
-            <span className={`truncate whitespace-nowrap ${desktopSidebarCollapsed ? "md:hidden" : ""}`}>Coop Vote</span>
+            <span className={`truncate whitespace-nowrap ${desktopSidebarCollapsed ? "md:hidden" : ""}`}>Attendance</span>
           </Link>
           <button
             aria-label="Close navigation"
@@ -371,7 +377,7 @@ export function DashboardLayout() {
               </button>
               <div>
                 <p className="text-xs font-medium uppercase tracking-[0.12em] text-muted-foreground">
-                  Coop Vote
+                  Coop Attendance
                 </p>
                 <h1 className="text-lg font-bold text-foreground">{pageTitle}</h1>
               </div>

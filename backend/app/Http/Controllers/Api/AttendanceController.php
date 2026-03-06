@@ -8,7 +8,6 @@ use App\Http\Controllers\Controller;
 use App\Models\Attendance;
 use App\Models\Election;
 use App\Models\User;
-use App\Models\Vote;
 use App\Services\AuditLogger;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Collection as EloquentCollection;
@@ -47,7 +46,6 @@ class AttendanceController extends Controller
                 'branch',
                 'voter_id',
                 'attendance_status',
-                'already_voted',
                 'created_at',
                 'updated_at',
             ])
@@ -87,8 +85,6 @@ class AttendanceController extends Controller
 
         $voters = $query->paginate((int) ($data['per_page'] ?? 25));
         $voterCollection = $voters->getCollection();
-        $alreadyVotedByUserId = $this->alreadyVotedByUserId($voterCollection, $electionId);
-
         $attendanceByUserId = collect();
         if ($electionId !== null && $voterCollection->isNotEmpty()) {
             $attendanceByUserId = Attendance::query()
@@ -105,8 +101,7 @@ class AttendanceController extends Controller
                 $electionTitle,
                 'manual',
                 null,
-                $attendanceByUserId->get($voter->id),
-                $alreadyVotedByUserId[$voter->id] ?? null
+                $attendanceByUserId->get($voter->id)
             )
         )->values()->all();
 
@@ -231,7 +226,6 @@ class AttendanceController extends Controller
             ->whereKey($electionId)
             ->value('title');
         $freshVoter = $voter->fresh() ?? $voter;
-        $alreadyVotedByUserId = $this->alreadyVotedByUserId(new EloquentCollection([$freshVoter]), $electionId);
 
         AuditLogger::log(
             $request,
@@ -249,8 +243,7 @@ class AttendanceController extends Controller
                 $electionTitle,
                 'manual',
                 $checkedInAt?->toIso8601String(),
-                $attendance?->fresh(),
-                $alreadyVotedByUserId[$freshVoter->id] ?? null
+                $attendance?->fresh()
             ),
         ], 201);
     }
@@ -317,7 +310,6 @@ class AttendanceController extends Controller
         }
 
         $freshVoter = $user->fresh() ?? $user;
-        $alreadyVotedByUserId = $this->alreadyVotedByUserId(new EloquentCollection([$freshVoter]), $electionId);
 
         AuditLogger::log(
             $request,
@@ -333,8 +325,7 @@ class AttendanceController extends Controller
                 $electionTitle,
                 'manual',
                 null,
-                null,
-                $alreadyVotedByUserId[$freshVoter->id] ?? null
+                null
             ),
         ]);
     }
@@ -1287,10 +1278,9 @@ class AttendanceController extends Controller
         }
 
         if ($status === AttendanceStatus::PRESENT->value) {
-            $query->whereExists(function ($builder) use ($electionId): void {
-                $builder->select(DB::raw(1))
+            $query->whereIn('id', function ($builder) use ($electionId): void {
+                $builder->select('user_id')
                     ->from('attendances')
-                    ->whereColumn('attendances.user_id', 'users.id')
                     ->where('attendances.election_id', $electionId)
                     ->where('attendances.status', AttendanceStatus::PRESENT->value);
             });
@@ -1298,49 +1288,12 @@ class AttendanceController extends Controller
             return;
         }
 
-        $query->whereNotExists(function ($builder) use ($electionId): void {
-            $builder->select(DB::raw(1))
+        $query->whereNotIn('id', function ($builder) use ($electionId): void {
+            $builder->select('user_id')
                 ->from('attendances')
-                ->whereColumn('attendances.user_id', 'users.id')
                 ->where('attendances.election_id', $electionId)
                 ->where('attendances.status', AttendanceStatus::PRESENT->value);
         });
-    }
-
-    /**
-     * @return array<int, bool>
-     */
-    private function alreadyVotedByUserId(EloquentCollection $voters, ?int $electionId): array
-    {
-        if ($voters->isEmpty()) {
-            return [];
-        }
-
-        if ($electionId === null) {
-            return $voters->mapWithKeys(fn (User $voter): array => [
-                $voter->id => (bool) $voter->already_voted,
-            ])->all();
-        }
-
-        $hashesByUserId = $voters->mapWithKeys(fn (User $voter): array => [
-            $voter->id => Vote::voterHash((int) $voter->id, $electionId),
-        ]);
-
-        $voteHashes = Vote::query()
-            ->where('election_id', $electionId)
-            ->whereIn('voter_hash', $hashesByUserId->values()->all())
-            ->select('voter_hash')
-            ->distinct()
-            ->pluck('voter_hash')
-            ->flip();
-
-        $alreadyVotedByUserId = [];
-        foreach ($voters as $voter) {
-            $hash = $hashesByUserId[$voter->id];
-            $alreadyVotedByUserId[$voter->id] = $voteHashes->has($hash);
-        }
-
-        return $alreadyVotedByUserId;
     }
 
     private function toAttendanceRow(
@@ -1349,8 +1302,7 @@ class AttendanceController extends Controller
         ?string $electionTitle,
         string $source,
         ?string $checkedInAtOverride = null,
-        ?Attendance $attendance = null,
-        ?bool $alreadyVotedOverride = null
+        ?Attendance $attendance = null
     ): array {
         if ($attendance && in_array($attendance->status, ['present', 'absent'], true)) {
             $status = $attendance->status;
@@ -1365,7 +1317,6 @@ class AttendanceController extends Controller
         $checkedInAt = $status === AttendanceStatus::PRESENT->value
             ? ($checkedInAtOverride ?? optional($attendance?->checked_in_at)->toIso8601String() ?? optional($voter->updated_at)->toIso8601String())
             : null;
-        $alreadyVoted = $alreadyVotedOverride ?? (bool) $voter->already_voted;
 
         return [
             'id' => $voter->id,
@@ -1385,7 +1336,7 @@ class AttendanceController extends Controller
                 'branch' => $voter->branch,
                 'voter_id' => $voter->voter_id,
                 'attendance_status' => $status,
-                'already_voted' => $alreadyVoted,
+                'already_voted' => false,
             ],
             'created_at' => optional($attendance?->created_at ?? $voter->created_at)->toIso8601String(),
             'updated_at' => optional($attendance?->updated_at ?? $voter->updated_at)->toIso8601String(),

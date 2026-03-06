@@ -31,9 +31,17 @@ interface CandidateUpdatePayload {
   bio?: string | null;
 }
 
-export async function getElections(status?: ElectionStatus) {
+interface GetElectionsOptions {
+  compact?: boolean;
+}
+
+export async function getElections(status?: ElectionStatus, options?: GetElectionsOptions) {
+  const compact = options?.compact;
   const response = await api.get<{ data: Election[] }>("/elections", {
-    params: status ? { status } : undefined,
+    params: {
+      ...(status ? { status } : {}),
+      ...(compact ? { compact: 1 } : {}),
+    },
   });
   return response.data.data;
 }

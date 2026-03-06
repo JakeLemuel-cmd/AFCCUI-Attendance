@@ -17,15 +17,15 @@ export function AuthLayout() {
                 }}
                 className="h-10 w-auto rounded bg-white/90 p-1"
               />
-              <span className="whitespace-nowrap">Coop Vote</span>
+              <span className="whitespace-nowrap">Coop Attendance</span>
             </div>
             <div className="space-y-3">
-              <h1 className="text-3xl font-extrabold leading-tight">Secure Cooperative Elections</h1>
+              <h1 className="text-3xl font-extrabold leading-tight">Secure Cooperative Attendance</h1>
               <p className="max-w-sm text-sm text-primary-foreground/85">
-                Role-based access, anonymized ballots, and real-time outcomes in one trusted Coop Vote platform.
+                Role-based access and real-time Attendance in one trusted Coop Attendance platform.
               </p>
             </div>
-            <p className="text-xs text-primary-foreground/70">Production Voting Suite</p>
+            <p className="text-xs text-primary-foreground/70">Production Attendance Suite</p>
           </div>
           <div className="p-6 sm:p-10">
             <Outlet />

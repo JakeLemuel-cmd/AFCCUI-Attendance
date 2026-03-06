@@ -635,7 +635,7 @@ export function AttendanceDashboard({ view = "attendance" }: AttendanceDashboard
   useEffect(() => {
     void (async () => {
       try {
-        const loadedElections = await getElections();
+        const loadedElections = await getElections(undefined, { compact: true });
 
         if (loadedElections.length > 0) {
           const defaultElection =

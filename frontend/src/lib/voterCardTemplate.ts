@@ -839,16 +839,6 @@ export async function buildVoterQrCardCanvas(options: RenderVoterQrCardOptions) 
   context.fillStyle = resolvedLayout.backgroundColor;
   context.fillRect(0, 0, resolvedLayout.canvasWidth, resolvedLayout.canvasHeight);
 
-  const headerHeight = Math.min(resolvedLayout.canvasHeight, Math.max(0, resolvedLayout.headerHeight));
-  if (headerHeight > 0) {
-    context.fillStyle = resolvedLayout.headerColor;
-    context.fillRect(0, 0, resolvedLayout.canvasWidth, headerHeight);
-  }
-
-  context.fillStyle = resolvedLayout.headerTextColor;
-  context.font = `700 ${Math.max(24, Math.round(headerHeight * 0.42))}px Segoe UI, Arial, sans-serif`;
-  context.fillText(resolvedLayout.headerText, resolvedLayout.headerTextX, resolvedLayout.headerTextY);
-
   if (resolvedLayout.cardTemplateImageDataUrl) {
     try {
       const cardTemplateImage = await loadImage(resolvedLayout.cardTemplateImageDataUrl, "Unable to render card template image.");

@@ -18,9 +18,13 @@ class ElectionController extends Controller
     public function index(Request $request): JsonResponse
     {
         $user = $request->user();
+        $isCompact = $request->boolean('compact');
         $query = Election::query()
-            ->forDashboard()
             ->orderByDesc('created_at');
+
+        if (! $isCompact) {
+            $query->forDashboard();
+        }
 
         if ($user->isElectionAdmin()) {
             $query->where('created_by', $user->id);
